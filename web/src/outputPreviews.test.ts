@@ -1,0 +1,63 @@
+import { describe, expect, it } from "vitest";
+import { createOutputPreviews, type OutputResponse } from "./outputPreviews";
+
+describe("output previews", () => {
+  it("downloads and sorts partial generation outputs in business order", async () => {
+    const outputs: OutputResponse[] = [
+      { id: "package-id", output_type: "package", width: 800, height: 800, quality_status: "passed" },
+      { id: "main-id", output_type: "main", width: 800, height: 800, quality_status: "passed" },
+      { id: "certificate-id", output_type: "certificate", width: 800, height: 800, quality_status: "passed" },
+    ];
+    const downloaded: string[] = [];
+
+    const previews = await createOutputPreviews(
+      outputs,
+      async (output) => {
+        downloaded.push(output.id);
+        return new Blob([output.id], { type: "image/png" });
+      },
+      (blob) => `blob://${blob.size}`,
+    );
+
+    expect(downloaded).toEqual(["package-id", "main-id", "certificate-id"]);
+    expect(previews.map((preview) => preview.output_type)).toEqual(["main", "certificate", "package"]);
+    expect(previews.every((preview) => preview.url.startsWith("blob://"))).toBe(true);
+  });
+
+  it("can preserve API order for account gallery history", async () => {
+    const outputs: OutputResponse[] = [
+      { id: "latest-scene-id", output_type: "scene", width: 800, height: 800, quality_status: "passed" },
+      { id: "older-main-id", output_type: "main", width: 800, height: 800, quality_status: "passed" },
+    ];
+
+    const previews = await createOutputPreviews(
+      outputs,
+      async (output) => new Blob([output.id], { type: "image/png" }),
+      (blob) => `blob://${blob.size}`,
+      { preserveOrder: true },
+    );
+
+    expect(previews.map((preview) => preview.id)).toEqual(["latest-scene-id", "older-main-id"]);
+  });
+
+  it("can ignore missing gallery files and keep loading the remaining history", async () => {
+    const outputs: OutputResponse[] = [
+      { id: "missing-output-id", output_type: "scene", width: 800, height: 800, quality_status: "passed" },
+      { id: "available-output-id", output_type: "main", width: 800, height: 800, quality_status: "passed" },
+    ];
+
+    const previews = await createOutputPreviews(
+      outputs,
+      async (output) => {
+        if (output.id === "missing-output-id") {
+          throw new Error("OUTPUT_FILE_NOT_FOUND: 输出文件不存在。");
+        }
+        return new Blob([output.id], { type: "image/png" });
+      },
+      (blob) => `blob://${blob.size}`,
+      { preserveOrder: true, ignoreDownloadErrors: true },
+    );
+
+    expect(previews.map((preview) => preview.id)).toEqual(["available-output-id"]);
+  });
+});

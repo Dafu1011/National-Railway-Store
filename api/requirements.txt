@@ -1,0 +1,11 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+
+psycopg[binary]>=3.2
+redis>=5.0
+celery>=5.4
+
+pillow>=10.3
+openai>=1.99

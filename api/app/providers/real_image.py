@@ -1,0 +1,766 @@
+from __future__ import annotations
+
+from collections import deque
+from datetime import date
+from dataclasses import dataclass
+from io import BytesIO
+from pathlib import Path
+from typing import Any
+
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
+
+from app.rendering.barcode.images import render_barcode_image
+from app.rendering.barcode.validators import BarcodeType
+from app.providers.kele import KeleGptImage2Provider
+
+
+OUTPUT_SPECS: tuple[tuple[str, int, int], ...] = (
+    ("main", 800, 800),
+    ("certificate", 800, 800),
+    ("package", 800, 800),
+    ("detail", 800, 2400),
+    ("scene", 800, 800),
+)
+DEFAULT_EDIT_SIZE = "1024x1024"
+
+
+@dataclass(frozen=True)
+class GeneratedImage:
+    output_type: str
+    width: int
+    height: int
+    path: Path
+
+
+class KeleFiveImagePipeline:
+    name = "kele-gpt-image-2"
+
+    def __init__(self, provider: KeleGptImage2Provider, font_path: str = "", edit_size: str = DEFAULT_EDIT_SIZE):
+        self.provider = provider
+        self.font_path = font_path
+        self.edit_size = edit_size.strip() or DEFAULT_EDIT_SIZE
+
+    def generate_five_images(
+        self,
+        *,
+        output_dir: Path,
+        job_id: str,
+        product: dict[str, Any],
+        project: dict[str, Any],
+        source_image_path: Path,
+    ) -> list[GeneratedImage]:
+        job_dir = output_dir / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        generated: list[GeneratedImage] = []
+
+        for output_type, width, height in OUTPUT_SPECS:
+            if output_type == "detail":
+                module_images: list[Image.Image] = []
+                for prompt in _detail_module_prompts(product):
+                    raw = self.provider.edit_image(
+                        prompt=prompt,
+                        size=self.edit_size,
+                        image_paths=[source_image_path],
+                    )
+                    module_images.append(_open_provider_image(raw))
+                image = _build_detail_page(module_images, product, project, self.font_path)
+                path = job_dir / f"{output_type}.png"
+                image.save(path, format="PNG")
+                generated.append(GeneratedImage(output_type=output_type, width=image.width, height=image.height, path=path))
+                continue
+
+            raw = self.provider.edit_image(
+                prompt=_prompt_for(output_type, product, project),
+                size=self.edit_size,
+                image_paths=[source_image_path],
+            )
+            image = _open_provider_image(raw)
+            image = _normalize_size(image, width, height, background="white" if output_type in {"main", "certificate", "package"} else "#f3f4f6")
+            path = job_dir / f"{output_type}.png"
+            image.save(path, format="PNG")
+            generated.append(GeneratedImage(output_type=output_type, width=image.width, height=image.height, path=path))
+
+        return generated
+
+
+def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, Any] | None = None) -> str:
+    name = product.get("name", "the uploaded product")
+    category = str(product.get("category", "") or "")
+    project = project or {}
+    package_config = project.get("package_config", {}) if isinstance(project.get("package_config", {}), dict) else {}
+    certificate_config = project.get("certificate_config", {}) if isinstance(project.get("certificate_config", {}), dict) else {}
+    package_manufacturer = (
+        package_config.get("manufacturer_name")
+        or package_config.get("company_name")
+        or _company_name(product, certificate_config)
+    )
+    package_address = package_config.get("manufacturer_address") or package_config.get("address") or ""
+    package_rows = _package_information_rows(product, package_manufacturer, package_address)
+    package_fact_rows = [
+        ("brand", product.get("brand", "")),
+        ("product name", product.get("name", "")),
+        ("model", product.get("model", "")),
+        ("material", product.get("material", "")),
+        ("manufacturer", package_manufacturer),
+        ("address", package_address),
+        ("barcode type", project.get("barcode_type", "")),
+        ("barcode digits", project.get("barcode_value", "")),
+    ]
+    package_text_layout = (
+        "Candidate package front text layout, printed directly by the image model as native ink on the carton, "
+        "using only non-empty user-entered rows in this Chinese label order: "
+        f"{_format_chinese_rows(package_rows)} "
+    )
+    package_facts = (
+        f"Candidate package information to print directly on the carton, from non-empty user-entered fields only: "
+        f"{_format_fact_rows(package_fact_rows)} "
+    )
+    certificate_facts = (
+        "Candidate certificate information to print directly on the certificate card, from user-entered fields where available: "
+        f"brand: {product.get('brand', '')}; "
+        f"product name: {product.get('name', '')}; "
+        f"model/specification: {product.get('model', '')}; "
+        f"capacity/specification: {_spec_text(product)}; "
+        f"production date: {certificate_config.get('production_date', '')}; "
+        f"inspector: {certificate_config.get('inspector', '')}; "
+        f"company: {_company_name(product, certificate_config)}; "
+        f"barcode type: {project.get('barcode_type', '')}; "
+        f"barcode digits: {project.get('barcode_value', '')}. "
+    )
+    reference_base = (
+        "Use the uploaded product photo as the exact product reference. "
+        "Keep the product structure, color, material, proportions, wear, and surface texture consistent. "
+        "Identify and keep only the actual sellable product body from the uploaded photo. Exclude display stands, support poles, bases, hooks, hangers, risers, background props, and any non-product objects even if they touch or hold the product in the source image. For headphones or earphones, the product body means only the headband, earcups, hinges, cushions, cable, controls, and other headphone parts; never include a mannequin head, stand, rack, pole, or base as part of the product. "
+        "preserve existing physical markings: the exact visible logo, brand lettering, small badges, and surface markings from the uploaded product when visible, but do not invent new readable text. "
+        "If the source product includes an R mark, circled R, or tiny registered trademark symbol beside the logo, that same tiny registered trademark symbol must appear in every generated product view where that side is visible. "
+        "do not add parts, accessories, packaging, labels, or quantities that are not visible in the uploaded image. "
+        "Do not add new machine-readable codes, watermarks, certificate-like words, or random labels. "
+    )
+    clean_product_surface = (
+        "Keep the product surface clean, continuous, and materially plausible. The white marks to avoid are not acceptable texture: they are clipped specular highlights, blown-out pure-white patches, and mask-like cutout residue. No white speckles, no white noise dots, no salt-and-pepper artifacts, no paint-chip-like white patches, no masking residue, no cutout scars, no random bright flecks, no broken highlights, no large pure-white holes inside the product body, and no white halo along the product edge. For light gray or white products, preserve soft gray tonal detail and separation from the white background; do not clip the surface to pure #ffffff. Real photographic highlights are allowed only when smooth, coherent, feathered, low-to-moderate contrast, and following the product material and lighting direction. "
+    )
+    catalog_exposure_control = (
+        "Use the same restrained exposure discipline as the certificate co-photo: soft natural daylight from the left and upper-left, one consistent light source, no harsh studio flash, no high-key overexposure, no blown-out glossy bands, and no pure-white clipping on the product surface. The product may be light gray or white, but it must still show continuous midtone detail, cushion texture, seams, bevels, rim edges, hinge transitions, and material curvature. Keep highlights controlled and soft; do not let any product surface, edge, cable, headband, earcup, or microphone turn into a pure #ffffff patch or merge into the white background. A very light natural contact shadow is allowed because product shape fidelity and readable edges are more important than removing every shadow. "
+    )
+    real_photo = (
+        "The output must look like a real camera photograph, not CGI, not a 3D render, not illustration, not a flat mockup. "
+        "Use believable lens perspective, realistic contact with the surface, real material texture, slight photographic imperfections, and normal depth of field. "
+        "Use clean product-catalog lighting with minimal or no visible floor shadow under the product. "
+    )
+    prompts = {
+        "main": (
+            reference_base
+            + real_photo
+            + clean_product_surface
+            + catalog_exposure_control
+            + f"Create a marketplace product main photo for {name}. White sweep or white tabletop background, only the sellable product itself visible, full product visible, product fills most of the frame, natural studio photo lighting, minimal or no visible floor shadow. Do not show source-photo display hardware or auxiliary objects; if the uploaded product is photographed on a stand, remove the stand and reconstruct only the product body in a natural standalone product pose."
+        ),
+        "certificate": (
+            reference_base
+            + real_photo
+            + clean_product_surface
+            + "Photograph the product as a realistic phone-style angled top-down snapshot. Use the uploaded product image as the only product reference, 以用户上传的商品图片作为唯一商品参考, and create a 真实自然的手机随手拍 product co-photo. Output must be exactly 800x800 pixels, 1:1 square, 800x800, 1:1 square, exactly 800x800. "
+            "The scene is a pure seamless #ffffff white background plus a pure white matte support surface, using the support as a single flat, level, uncurved horizontal plane and horizontal tabletop plane. The background and tabletop should visually merge naturally, with no visible horizon line, no horizon line, no wall, no window curtain, no visible table edge, no floor, no table edge, no curved sweep backdrop, no bent paper, no studio cove, no grey wall, no floor, and no environmental clutter. The white area should occupy most of the frame with large pure white negative space across the lower half; the lower half must keep a large clean pure-white negative-space area. The whole scene must feel like a product casually photographed on a clean white tabletop, not like a cutout pasted onto a background. keep a pure-white background while allowing one realistic soft contact shadow that follows the product base and one consistent light source; a very light natural contact shadow is allowed when it looks physically correct. "
+            "Keep the white plane truly clean and bright pure white: no gray gradient, no off-white texture, no speckled background noise, no dirty texture, no mottled paper grain, no beige stains, no dirty shadow patches, no gray or beige shadow patch around the product, no concave or convex support surface, and no studio sweep shading. A very light and soft natural contact shadow is allowed only where needed to anchor the product physically to the white tabletop. Do not create any fake floating-cutout look. product shape fidelity is more important than shadow removal; clean natural product edges are more important than aggressively removing all shadows. "
+            "Strictly restore only the uploaded product's real visible category, structure, shape, proportions, color, material, texture, surface finish, logo, seams, edges, labels, ports, parts, and all visible product details. Do not replace the product, do not recolor it, do not redesign it, do not change its structure, count, scale, or proportions, and do not add accessories, decorative blocks, pads, plates, caps, labels, parts, packaging, or quantities that are not visible in the uploaded image. For headphones, the headband must remain the same continuous uploaded headband surface; do not add any black rectangular pad, black top block, extra cushion, sticker, label, logo plate, or foreign object on the headband unless that exact object is clearly visible in the uploaded product. "
+            "Preserve the exact original product silhouette; preserve the exact original product silhouette and keep every outer contour smooth, continuous, anti-aliased, clean, and physically plausible. Product edges must look like real photographic edges, not AI masking or digital cutout edges. No jagged stair-step edges, no pixelated cutout edge, no pixelated edge, no serrated contour, no jagged stair-step edges, no pixelated cutout edge, no serrated contour, no ragged AI mask edge, no broken outline, no white halo, no bright fringe, no dark fringe, no fuzzy cutout edge, no aliasing, and no pasted-object appearance. Every product edge, corner, rim, lip, seam, bevel, top boundary, bottom edge, and brand-side contour must remain completely visible and naturally resolved. No product edge, corner, rim, lip, seam, or silhouette detail may be covered; no product edge, corner, rim, lip, seam, or silhouette detail may be covered; the complete outer boundary must remain visible. "
+            "Use the uploaded image geometry as a locked reference; use the uploaded image geometry as a locked reference. Do not smooth, redraw, stylize, reinterpret, simplify, or invent a cleaner or more symmetrical replacement product shape; do not smooth, redraw, stylize, or reinterpret the product body. There must be no deformation, no warping, no squeezing, no stretching, no melted edges, no perspective exaggeration, and no artificial symmetry correction; no product deformation, no warping, no squeezing, no stretching. Cylindrical products must keep straight parallel body sides, cylindrical products must keep straight parallel sides, aligned top and bottom ellipses, correct lid proportions, and the same tall body proportions as the uploaded reference. Do not turn a tall cylinder into a tapered, swollen, barrel-shaped, or hourglass-shaped object; do not turn a tall cylinder into a tapered or swollen shape. "
+            "Preserve only brand marks, logos, and small markings that are actually visible in the uploaded product reference, including their original proportions and any tiny registered trademark mark when present. Do not invent, redraw, enlarge, relocate, stylize, distort, or replace logos or add unrelated brand marks. Preserve all small shape transitions, bevels, seams, contours, and surface texture clearly without adding non-product objects. "
+            "Place the uploaded product in the upper-right area; place the uploaded product naturally in the upper-right area with visual center around 68% to 72% of image width and 32% to 38% of image height. Do not center it, do not push it against the frame edge, and keep the entire product visible with comfortable white breathing room around the top, sides, and bottom. The placement should feel casually composed by a person using a phone, not mathematically rigid or mechanically positioned. "
+            "Choose the product's orientation from its real structure, center of gravity, and normal display logic; do not mechanically force every product to stand upright. Bottles, thermos cups, cans, boxes, and stable flat-bottom products may stand upright. Drill bits, knife rods, screwdrivers, pen-shaped tools, long accessories, pipes, and other slender unstable products must lie flat or slightly diagonal rather than stand vertically against gravity. Power tools, hardware tools, mechanical parts, and irregular products should contact the support surface on their most stable display face. Soft or flexible products should fall naturally with mild folds. Preserve the source count and relationship for multi-piece sets. "
+            "For the uploaded product, choose a natural catalog-safe orientation for its real category after removing any non-product support hardware. Headphones should appear as the headphones alone, with the headband and earcups naturally arranged on the tabletop or in a stable product-only display pose; no black stand, pole, base, rack, mannequin, hook, or hanger may appear. Do not make the product lean unnaturally, tip, float, hover, or balance impossibly. Give it only a very subtle natural rotational angle if needed so the placement feels like a casual real phone snapshot rather than a perfectly staged catalog pose. "
+            "The product must physically contact the support surface with a believable contact point: no floating, no tipping, no impossible balance, no intersection, and no detached cutout appearance. Preserve real material details, mild natural highlights, realistic black surface reflections, and one consistent reflection and lighting direction. "
+            "Directly generate both the product and the certificate in one natural photo, directly generate both the product and the certificate in one natural photo; do not reserve an empty area for backend compositing, do not create a cutout, do not paste a later card, and do not make the certificate look like a separate overlay layer. The certificate must be generated by the image model as part of the same camera shot, with the same lens perspective, same white tabletop plane, same lighting direction, and same natural photo texture as the product. "
+            + certificate_facts
+            + "On the certificate, print only user-entered fields that match the visible uploaded product. If a user-entered value conflicts with the visible product category, structure, or appearance, omit that row rather than printing incorrect product information. Do not write capacity, volume, material, model, product name, brand, or specification values that belong to another product type; do not invent replacement values. "
+            + "Place the certificate in the same current lower-left area and keep the current reference-like lower-left placement. The certificate should have a lower-left to upper-right diagonal relationship with the product and should sit reasonably close to the product base without touching it. Its visual center should stay around 31% to 35% of image width and 62% to 66% of image height; visual center should be around 31% to 35% of image width and 62% to 66% of image height. "
+            "The certificate is a single small horizontal rectangular white hard card or slightly thick paper card, laid flat on the same horizontal tabletop plane as the product. It is not tissue, not folded paper, not stacked sheets, not a standing card, not a portrait sheet, and not a floating overlay; not tissue, not folded, not stacked, not diamond-patterned. The card may have only extremely slight natural paper waviness while retaining clean sharply cut edges and corners; may show only very slight natural paper waviness or tiny surface wrinkles. Its card edges must have no frayed, furry, torn, ragged, or fuzzy edges. Its long edge should remain nearly horizontal with only a slight 3 to 5 degree rotation and share exactly the same tabletop perspective as the product, not a perfectly front-facing rectangle; long edge nearly horizontal with only a slight 3 to 5 degree rotation; not a vertical standing card, not a portrait paper sheet, not a floating overlay. "
+            "The certificate face must be clear and readable. It should show a clean normal product inspection certificate layout with the title 产品合格证 or 合格证, only the compatible user-entered information rows, inspection result 合格, and one small barcode using the entered barcode digits. For the certificate barcode, render a realistic EAN-style retail barcode: the first digit printed outside the barcode bars on the left, the remaining digits printed below the bars in two groups, and a clear center guard before the eighth digit. The start guard, center guard before the eighth digit, and end guard bars must be the longest. Use thin and thick vertical bars with varied bar heights, clean white gaps, realistic quiet zones, and no decorative simplification. barcode numerals must exactly match the entered barcode digits, keep the digits separated and readable below the bars, use regular-weight numerals only, and avoid any scrambled, merged, missing, repeated, invented, or substituted digits; no malformed barcode numerals, no random barcode digits, no pseudo barcode numbers, no distorted barcode numbers, and no barcode-number gibberish. The certificate printing must be black or dark gray ink with a simple blue border if needed; no red triangle stamp, no red seal, no QR code, no extra marks, no garbled characters, no pseudo text, no random English replacement words, no duplicate text blocks, and no invented unrelated fields. "
+            "Keep a clear lower-left to upper-right diagonal relationship between the certificate and the product. The certificate and product must have a clear white gap, must leave a clear white gap from the product and never slide underneath or cover the product, must never touch or overlap, and the certificate must never slide underneath or cover any portion of the product; do not overlap. Keep both subject areas away from the exact image center. The visual mass should remain mainly in the upper and middle-upper part of the frame while the lower half remains mostly clean pure white negative space. "
+            "Use only the referenced product's sellable body on the pure white plane: no props, no desk accessories, no plants, no laptop, no books, no pens, no hands, no packaging box, no extra bottle, no decorative objects, no display stand, no support pole, no base, and no unrelated objects. "
+            "Use a high front-left angled top-down phone viewpoint: camera above and slightly in front-left of the horizontal tabletop plane, lens angled downward about 50 to 55 degrees. This is not a full top-down flat-lay and not a straight front view. Use an equivalent 28 to 35 mm phone wide-angle smartphone lens with mild natural near-large/far-small perspective, but no obvious wide-angle stretching, barrel distortion, edge deformation, or exaggerated perspective. "
+            "The camera perspective must make the product look naturally photographed rather than digitally inserted. Maintain consistent perspective between the product body, its top ellipse, bottom contact, and the horizontal tabletop. Do not create an unnaturally oversized top, tiny lower body, or distorted cylindrical silhouette. "
+            "Use soft natural daylight from the left and upper-left. The product top and left side may have soft believable highlights, but keep all highlights controlled and preserve black surface detail. Do not overexpose the top cap, do not clip black surfaces into white or gray, and do not let the product edge disappear into the background. Maintain clear separation between the dark product contour and the white background. "
+            "A very light natural contact shadow is allowed directly below and immediately beside the product so it sits physically on the tabletop, but avoid heavy cast shadows, broad gray patches, beige shadow stains, dirty shadow halos, and any shadow shape that visually changes or damages the true product silhouette. "
+            "The final feeling must be an ordinary indoor natural-light phone snapshot and ordinary indoor natural-light smartphone snapshot: photorealistic, natural, restrained, believable, casually composed, with slight phone-lens perspective, clean anti-aliased product edges, and clear real material texture. Avoid polished commercial advertising style, perfect CGI symmetry, strong studio lighting, exaggerated reflections, mirror reflections, floating display effects, fake cutout shadows, digital compositing artifacts, over-sharpened edges, or CGI rendering."
+        ),
+        "package": (
+            reference_base
+            + real_photo
+            + clean_product_surface
+            + catalog_exposure_control
+            + "Create a pure white background plain carton base photo with an appropriately sized kraft retail carton on the left and the uploaded product placed near the carton on the right-side tabletop when physically possible. The product may occupy more horizontal space, sit lower in the frame, appear as a flatter top or side view, or be less visually prominent if that is required by its natural resting pose. Use the uploaded product image as the only visual reference for the product's real outer shape, appearance, visible parts, proportions, material, color, surface texture, markings, and structural relationships; do not copy any pose that depends on a stand, hook, rack, hanger, pole, base, mannequin, or other display support. Output must be exactly 800x800 pixels, 1:1 square, 800x800, 1:1 square. "
+            "The scene must use a clean seamless pure #ffffff white background and a pure white matte tabletop surface. The background and tabletop should visually merge naturally with no visible horizon line, no wall, no table edge, no floor, no colored background, no environmental objects, and no clutter. "
+            "Packaging shape and size must adapt to the uploaded product's visible real structure, outer dimensions, folded or storage volume, and realistic retail packing logic. Do not default to a tall narrow bottle carton, high box, or vertical box shape. For headphones or earphones, use a medium-small headphone retail box that is wider and shallower than a bottle carton, sized to fit folded or nested earcups and headband; never use a thermos-style carton or oversized shipping box for headphones. "
+            "Use a normal retail carton style: a simple store-ready upright kraft carton with a top tuck flap or clean lid seam, subtle bottom seam, realistic cardboard fiber texture, subtle real used-photo imperfections, and proportions that fit the uploaded product. Make it designed retail packaging, not a plain generic shipping carton, not an oversized shipping carton, not an appliance carton, and not a decorative poster or gift box. "
+            "The carton must be structurally complete and fully visible in the final frame. Do not crop, truncate, erase, melt, overexpose, or hide the carton top, bottom, top flaps, lid seam, front corners, side corners, lower edge, or any outer packaging boundary. The complete packaging silhouette must remain visible and physically plausible. "
+            "Place the appropriately sized carton on the left and the product resting area nearby with natural retail-photo spacing. Physical realism has absolute priority over product visibility, product attractiveness, front-facing display, and showing product features. Do not rotate, stand, lean, prop up, or balance the product just to show more of the product. It is acceptable if the product looks lower, flatter, less prominent, less complete, less front-facing, partially less informative, or visually less impressive, as long as it rests naturally according to physics. The carton may stand upright and face the camera for readable front printing. This carton-facing rule applies only to the carton, never to the product. The product must not copy the carton's upright front-facing orientation. For product placement only, preserve the uploaded product's identity, appearance, visible parts, materials, proportions, and structural relationships, not its original supported display position, camera viewpoint, or canvas orientation. First remove every non-product object from the source reference, including stands, poles, bases, hooks, hangers, racks, mannequins, and invisible support; then choose the product pose from its real-world normal use orientation, normal resting orientation, designed functional contact surface, actual stable contact points, and center of gravity. A product may stand upright only when it is explicitly designed to stand unsupported in normal use or normal retail display and has a clear stable base or designed standing foot. A broad surface alone is not permission to stand the product upright. For desktop-use products, handheld devices, controllers, remotes, mice, keyboards, chargers, power banks, small electronics, tools, and any product with a designed bottom or underside, place the product in its real tabletop resting pose. The designed bottom, underside, feet, pads, base, or normal contact surface must be on the tabletop. The product top should face upward relative to the tabletop, not forward toward the camera. The top/use side may be visible only through a natural camera angle, not by rotating the product upright toward the camera. Do not rotate the product onto its front, tail, side, edge, cable, connector, rounded end, or decorative face just to satisfy a vertical composition. If the normal resting/use pose is horizontal, low, flat, side-lying, or slightly diagonal, keep that pose. The product may occupy more horizontal tabletop area when that is the physically natural resting pose; do not compress, crop, or stand the product to fit a narrow right-side silhouette. Forbidden: standing a normally flat tabletop product vertically on its tail, front, side, edge, curved end, cable, connector, or any narrow contact point. Forbidden: showing a normally flat tabletop product as an upright front-facing object beside the carton. Forbidden: using a small contact shadow to fake physical contact while the product is actually vertical. For products that need an external stand, hook, rack, hanger, pole, base, or mannequin to remain upright, unsupported vertical placement is forbidden after those supports are removed. Hard rule for headphones and earphones: when no visible stand or support fixture is included, vertical or upright placement is forbidden. The entire headphones must lie flat, side-lying, or low diagonal on the tabletop; the headband, both earcups, cable, inline control, and microphone must all rest on or visibly contact the tabletop. Do not support headphones only on one earcup edge or a narrow earcup rim, and do not let the headband rise as a free-standing arch. Do not let headphones balance upright on one edge, float, hover, lean without support, stand on a cable, or hang in the air. They may sit visually close but must not intersect. For this package co-photo, realistic consistent contact shadows directly beneath all tabletop contact points are required so the product and carton feel photographed together rather than composited separately. "
+            "The carton front face must be clearly visible and front face nearly parallel to the camera. The front print zone must be almost square-on to the camera, flat and stable enough for direct model-rendered package printing. carton front must be straight-on enough that model-generated native printing does not look tilted. avoid perspective that makes upright package text look crooked. Keep the front-face vertical side edges straight and nearly vertical, and keep horizontal package baselines level. Avoid strong perspective, slanted front faces, twisted cartons, diagonal front panels, trapezoid print zones, excessive convergence, or a carton that appears to rotate away from the viewer. "
+            "The visible carton side face may show only natural kraft cardboard and structural folds. It must be a plain unmarked side face with no side icons, side logos, side badges, side symbols, or side markings, no decorative side graphics, no unrelated warning marks, and no random printed elements. "
+            "The carton front must have no front rectangular frame, no bordered front panel, no printed box outline, and no unnecessary graphic border. model must directly print the package text and barcode on the carton as native ink on kraft cardboard, not as a floating sticker, not as an overlay, and not as a separate label. "
+            + package_facts
+            + package_text_layout
+            + "On the package, print only user-entered fields that match the visible uploaded product. If a user-entered value conflicts with the visible product category, structure, or appearance, omit that row rather than printing incorrect product information. Do not show capacity, volume, material, product name, model, brand, or specification values that belong to another product type; do not invent replacement values. Render only the selected compatible Chinese and Latin characters from the package information. no garbled characters, no pseudo text, no random English replacement words, no hallucinated brand, no duplicate text blocks, no unrelated product facts, and no invented labels. Keep all package text upright, level, evenly spaced, and aligned like normal package printing. The text must read upright relative to the carton front; it should share the carton front's vertical axis and horizontal baseline, with no diagonal drift and no perspective mismatch. "
+            "The barcode must be drawn directly on the carton front from the barcode type and barcode digits above, like a real EAN retail barcode. The first digit outside the barcode bars on the left, then the remaining digits sit below the bars in two groups with a center guard before the right group; start guard two bars, center guard two bars before the eighth digit, and end guard two bars are the longest. The bars must vary naturally in width and height like a real EAN retail barcode, with thin and thick vertical bars, clean white gaps, realistic quiet zones, and no decorative simplification. barcode digits must be clear, regular weight, and not bold; not bold, not blurry, not thickened, not smeared, and not fused into the vertical code bars. Use one barcode block only, with readable digits below the bars, sized realistically for the carton. "
+            "Do not add handling marks, up arrows, moisture marks, random extra labels, unrelated code graphics, unrelated QR codes, warning triangles, stickers, badges, unrelated certification symbols, or duplicate barcode blocks; avoid unrelated warning symbols. "
+            "Preserve the uploaded product's visible product type, main structure, proportions, seams, surface finish, material texture, edges, visible logo, and recognizable appearance after excluding non-product support hardware. Do not redesign, recolor, deform, squeeze, stretch, taper, swell, or replace the product. Do not preserve the uploaded source image's exact 2D silhouette, source camera angle, source canvas orientation, or supported display posture. Re-project the product into its physically natural tabletop pose even if this makes the product look flatter, lower, foreshortened, side-facing, or less complete than the source reference. For cylindrical products, preserve the cylindrical form accurately with straight body sides and properly aligned top and bottom ellipses; for headphones, preserve the headband arc, earcup shapes, hinge geometry, cushions, and left-right relationship without adding the source display stand. "
+            "Keep product edges smooth, continuous, anti-aliased, and photographic in the final natural resting pose. No jagged stair-step edges, no pixelated contour, no fuzzy AI mask, no white fringe, no broken outline, no melted edge, and no cutout halo. "
+            "The carton must remain fully inside the image with comfortable white breathing room around its complete packaging silhouette. Avoid unnecessary product cropping, but product physical resting pose is more important than showing every product outline or feature. Do not rotate the product upright just to keep the product outline complete. 商品包装必须完整，包装顶部、底部、四角、折边、封口线和箱体轮廓都必须完整可见. "
+            "Use soft natural light from the left and upper-left with restrained realistic highlights and mild clean contact shadows. Lighting direction must remain consistent across the carton, the product, and tabletop. Avoid harsh studio lighting and avoid conflicting highlight directions. "
+            "Critical exposure requirement: prevent overexposure on the top of the product and the top of the packaging. 商品顶部严禁过度曝光，包装顶部也严禁过曝. Preserve visible tonal detail, lid contour, rim, edge transitions, cardboard fibers, and top flap geometry. No part of the black product top may become a blown-out white or pale gray patch. "
+            "The final feeling must be a realistic retail product photograph: clean, believable, restrained, with complete packaging geometry, accurate product structure, a clean plain carton base photo, controlled highlights, and no overexposure on the product or carton top. Avoid CGI rendering, exaggerated advertising gloss, distorted packaging, crooked typography, warped retail codes, bold retail-code numerals, incomplete packaging, floating print layers, and blown-out highlights."
+        ),
+        "detail": (
+            reference_base
+            + "Create finished visual sections for a modular ecommerce detail page, not one long poster. "
+            "The backend will only stitch four finished generated sections vertically and will not add titles, labels, parameter tables, or other text afterward. "
+            "Each section may include integrated ecommerce graphic text when needed, but do not create machine-readable codes, watermarks, or random certificate-like labels."
+        ),
+        "scene": (
+            reference_base
+            + real_photo
+            + _scene_instruction(category)
+        ),
+    }
+    return prompts[output_type]
+
+
+def _clean_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _package_information_rows(
+    product: dict[str, Any],
+    manufacturer_name: object,
+    manufacturer_address: object,
+) -> list[tuple[str, str]]:
+    return [
+        ("品牌", _clean_text(product.get("brand", ""))),
+        ("品名", _clean_text(product.get("name", ""))),
+        ("型号", _clean_text(product.get("model", ""))),
+        ("材质", _clean_text(product.get("material", ""))),
+        ("厂商", _clean_text(manufacturer_name)),
+        ("地址", _clean_text(manufacturer_address)),
+    ]
+
+
+def _format_chinese_rows(rows: list[tuple[str, object]]) -> str:
+    parts = [f"{label}：{text}" for label, value in rows if (text := _clean_text(value))]
+    return "; ".join(parts) + ("." if parts else "no package text rows except barcode.")
+
+
+def _format_fact_rows(rows: list[tuple[str, object]]) -> str:
+    parts = [f"{label}: {text}" for label, value in rows if (text := _clean_text(value))]
+    return "; ".join(parts) + ("." if parts else "no text facts.")
+
+
+def _detail_module_prompts(product: dict[str, Any]) -> list[str]:
+    name = product.get("name", "the uploaded product")
+    fact_text = _format_fact_rows(
+        [
+            ("brand", product.get("brand", "")),
+            ("product", name),
+            ("model", product.get("model", "")),
+            ("material", product.get("material", "")),
+            ("color", product.get("color", "")),
+        ]
+    )
+    base = (
+        "Use the uploaded product photo as the exact product reference. "
+        "Match the marketplace main image product style exactly: keep the same product identity, outer appearance, color, material, scale, silhouette, visible parts, seams, finish, exact same visible product logo, and every visible marking consistent across all detail sections. "
+        "All rendered product appearances must come from the same single uploaded product reference. "
+        "For every close-up, bottom view, top view, side view, macro crop, inset, and full-product view, the product must share the same structure, geometry, proportions, material, texture, color, seams, edges, bevels, labels, logo position, and visible markings as the main product image. "
+        "Do not invent a different bottom, underside, lid, cap, base, anti-slip pad, connector, label, badge, logo placement, surface pattern, display stand, support pole, base, hanger, rack, mannequin, or non-product support hardware in any module. "
+        "If a part of the product is not visible in the uploaded reference, infer only a physically plausible continuation without adding readable logos, brand marks, labels, icons, decorative rings, or new surface features. "
+        "A partial detail view must never conflict with a full-product view or the marketplace main image: no extra logo on a bottom or underside unless the uploaded reference clearly shows that exact logo in that exact position, no missing visible logo when the source-facing side is shown, and no changed base shape, rim shape, seam count, texture direction, product posture logic, or material finish. "
+        "If the source product includes an R mark, circled R, or tiny registered trademark symbol beside the logo, preserve that same tiny registered trademark symbol in every product view where the logo side is visible. "
+        "Keep the product on a plain white or very light neutral background and avoid scene props: no laptop, no books, no pen, no plant, no hands, no other containers, and no unrelated objects. "
+        "Create one finished ecommerce detail section image with integrated layout and any needed Chinese text inside the generated image itself. "
+        f"Use exact non-empty user-entered product facts where relevant: {fact_text} "
+        "Do not render rows, table entries, labels, or placeholder text for absent fields; avoid missing-field placeholders in any language, empty-value markers, blank-value markers, placeholder dashes, or invented parameter values. "
+        "If a fact was not entered by the user, omit that label completely; the model may infer visual feature illustrations from the real uploaded product appearance, but must not present inferred values as structured specifications. "
+        "Do not add logos that are not on the product, machine-readable codes, watermarks, or certificate-like labels. "
+    )
+    return [
+        base + f"detail module: product hero finished ecommerce detail section for {name}. Strong opening banner, complete product facing the same branded side as the source image, clean premium ecommerce style.",
+        base + f"detail module: product-only feature section for {name}. Show the same product on a white or light neutral surface, with the branded side and exact logo markings still visible, no lifestyle environment.",
+        base + f"detail module: close-up detail finished ecommerce detail section for {name}. Macro-style product details showing material, opening, lid, finish, texture, bottom, seam, or key feature, plus a small full-product view with the exact logo and registered mark visible.",
+        base + f"detail module: structure and scale visual reference finished ecommerce detail section for {name}. Product angles and visual scale cues may be integrated when they come from the uploaded product appearance, while preserving the exact logo and registered mark on every visible product.",
+    ]
+
+
+def _scene_instruction(category: str) -> str:
+    lowered = category.lower()
+    if any(token in lowered for token in ("tool", "wrench", "hardware", "electric", "power")) or any(
+        token in category for token in ("工具", "扳手", "五金", "电动")
+    ):
+        return (
+            "Show the product in a real worksite or workshop as a natural casual phone snapshot, with no hands, no fingers, no gloves, and no human body parts visible. "
+            "Use real-world placement details: the product must sit, lie, lean, or rest according to its actual support area, center of gravity, cable direction, and contact points; no floating, impossible balance, staged perfect upright pose, or unsupported vertical placement. "
+            "Use ordinary practical lighting, slight handheld composition, believable scale, natural background clutter appropriate to the environment, and no readable new text."
+        )
+    return (
+        "Show a realistic product-in-use scene in a real environment matching the product category, like a natural casual phone snapshot rather than a staged catalog render. "
+        "The product must stand, lie, lean, or rest naturally according to its actual support area, center of gravity, cable direction, and contact points, with no hands, no fingers, no gloves, and no human body parts visible. "
+        "For headphones or earphones without a visible stand, make them rest naturally on the desk or surface with believable contact points for the headband, earcups, cable, inline control, or microphone; do not make them float, balance on one edge, or stand vertically without support. "
+        "Use believable scale, ordinary practical lighting, slight handheld framing, natural everyday placement details, and no readable new text."
+    )
+
+
+def _open_provider_image(raw: bytes) -> Image.Image:
+    with Image.open(BytesIO(raw)) as image:
+        return ImageOps.exif_transpose(image).convert("RGB")
+
+
+def _normalize_size(image: Image.Image, width: int, height: int, *, background: str) -> Image.Image:
+    canvas = Image.new("RGB", (width, height), background)
+    contained = ImageOps.contain(image, (width, height))
+    canvas.paste(contained, ((width - contained.width) // 2, (height - contained.height) // 2))
+    return canvas
+
+
+def _replace_neutral_background_with_white(image: Image.Image) -> Image.Image:
+    result = image.convert("RGB")
+    pixels = result.load()
+    for y in range(result.height):
+        for x in range(result.width):
+            r, g, b = pixels[x, y]
+            if r >= 205 and g >= 205 and b >= 205 and max(r, g, b) - min(r, g, b) <= 34:
+                pixels[x, y] = (255, 255, 255)
+    return result
+
+
+def _suppress_white_background_shadows(image: Image.Image) -> Image.Image:
+    result = image.convert("RGB")
+    pixels = result.load()
+    for y in range(result.height):
+        for x in range(result.width):
+            r, g, b = pixels[x, y]
+            if r >= 205 and g >= 205 and b >= 205 and max(r, g, b) - min(r, g, b) <= 42:
+                pixels[x, y] = (255, 255, 255)
+    return result
+
+
+def _normalize_certificate_tabletop_background(image: Image.Image) -> Image.Image:
+    result = image.convert("RGB")
+    pixels = result.load()
+    width, height = result.size
+    visited = bytearray(width * height)
+    protected = _dark_product_protection_mask(pixels, width, height)
+    queue: deque[tuple[int, int]] = deque()
+
+    for x in range(width):
+        queue.append((x, 0))
+        queue.append((x, height - 1))
+    for y in range(1, height - 1):
+        queue.append((0, y))
+        queue.append((width - 1, y))
+
+    while queue:
+        x, y = queue.popleft()
+        index = y * width + x
+        if visited[index]:
+            continue
+        visited[index] = 1
+        if not _is_certificate_background_pixel(pixels[x, y]):
+            continue
+        if protected[index]:
+            continue
+
+        pixels[x, y] = (255, 255, 255)
+        if x > 0:
+            queue.append((x - 1, y))
+        if x + 1 < width:
+            queue.append((x + 1, y))
+        if y > 0:
+            queue.append((x, y - 1))
+        if y + 1 < height:
+            queue.append((x, y + 1))
+    return result
+
+
+def _is_certificate_background_pixel(pixel: tuple[int, int, int]) -> bool:
+    r, g, b = pixel
+    return r >= 205 and g >= 205 and b >= 205 and max(r, g, b) - min(r, g, b) <= 42
+
+
+def _dark_product_protection_mask(pixels: Any, width: int, height: int) -> bytearray:
+    protected = bytearray(width * height)
+    radius = 8
+    for y in range(height):
+        for x in range(width):
+            r, g, b = pixels[x, y]
+            if max(r, g, b) > 95:
+                continue
+            for yy in range(max(0, y - radius), min(height, y + radius + 1)):
+                row = yy * width
+                for xx in range(max(0, x - radius), min(width, x + radius + 1)):
+                    protected[row + xx] = 1
+    return protected
+
+
+def _apply_used_photo_finish(image: Image.Image) -> Image.Image:
+    softened = image.filter(ImageFilter.GaussianBlur(0.18))
+    return Image.blend(image, softened, 0.16)
+
+
+def _build_detail_page(sources: list[Image.Image], product: dict[str, Any], project: dict[str, Any], font_path: str) -> Image.Image:
+    module_images = sources or [Image.new("RGB", (800, 800), "white")]
+    while len(module_images) < 4:
+        module_images.append(module_images[-1])
+
+    sections = [_fit_width(source, 800) for source in module_images[:4]]
+    total_height = sum(section.height for section in sections)
+    canvas = Image.new("RGB", (800, total_height), "white")
+    y = 0
+    for section in sections:
+        canvas.paste(section, (0, y))
+        y += section.height
+
+    return canvas
+
+
+def _certificate_rows(product: dict[str, Any], project: dict[str, Any]) -> list[tuple[str, str]]:
+    config = project.get("certificate_config", {}) if isinstance(project.get("certificate_config", {}), dict) else {}
+    return [
+        ("品牌", _clip(product.get("brand", ""), 16)),
+        ("产品名称", _clip(product.get("name", ""), 18)),
+        ("规格型号", _clip(_spec_model_text(product), 20)),
+        ("生产日期", _clip(config.get("production_date") or _date_text(project.get("created_at")), 16)),
+        ("检验员", _clip(config.get("inspector") or "QC-01", 16)),
+        ("公司名称", _clip(_company_name(product, config), 18)),
+    ]
+
+
+def _compose_certificate(image: Image.Image, product: dict[str, Any], project: dict[str, Any], font_path: str) -> None:
+    card = Image.new("RGBA", (360, 190), (250, 249, 244, 255))
+    draw = ImageDraw.Draw(card)
+    draw.rectangle((7, 7, 353, 183), outline=(37, 99, 172, 255), width=3)
+    title = _font(24, font_path)
+    body = _font(10, font_path)
+    draw.text((68, 20), "合 格 证", fill=(31, 41, 55, 255), font=title)
+    draw.line((34, 58, 202, 58), fill=(37, 99, 172, 255), width=2)
+    y = 70
+    for label, value in _certificate_rows(product, project):
+        draw.text((24, y), f"{label}: {value}", fill=(31, 41, 55, 255), font=body)
+        y += 17
+    barcode = render_barcode_image(
+        BarcodeType(project["barcode_type"]),
+        project["barcode_value"],
+        width=136,
+        height=44,
+        draw_border=False,
+    ).convert("RGBA")
+    card.alpha_composite(barcode, (196, 112))
+    tabletop_card = _flatten_certificate_for_tabletop(card)
+    _paste_tabletop_paper(image, tabletop_card, (95, 410))
+
+
+def _flatten_certificate_for_tabletop(card: Image.Image) -> Image.Image:
+    source = card.resize((360, 190), resample=Image.Resampling.LANCZOS)
+    output_size = (334, 220)
+    destination = [(44, 24), (293, 38), (328, 198), (7, 186)]
+    source_corners = [(0, 0), (source.width, 0), (source.width, source.height), (0, source.height)]
+    coefficients = _perspective_coefficients(destination, source_corners)
+    return source.transform(
+        output_size,
+        Image.Transform.PERSPECTIVE,
+        coefficients,
+        Image.Resampling.BICUBIC,
+        fillcolor=(0, 0, 0, 0),
+    )
+
+
+def _paste_tabletop_paper(base: Image.Image, overlay: Image.Image, xy: tuple[int, int]) -> None:
+    _paste_rgba_plain(base, overlay, xy)
+
+
+def _perspective_coefficients(
+    destination_points: list[tuple[int, int]],
+    source_points: list[tuple[int, int]],
+) -> list[float]:
+    matrix: list[list[float]] = []
+    for (x, y), (source_x, source_y) in zip(destination_points, source_points):
+        matrix.append([x, y, 1, 0, 0, 0, -source_x * x, -source_x * y, source_x])
+        matrix.append([0, 0, 0, x, y, 1, -source_y * x, -source_y * y, source_y])
+
+    for column in range(8):
+        pivot = max(range(column, 8), key=lambda row: abs(matrix[row][column]))
+        if abs(matrix[pivot][column]) < 1e-9:
+            raise ValueError("certificate perspective transform is singular")
+        matrix[column], matrix[pivot] = matrix[pivot], matrix[column]
+        divisor = matrix[column][column]
+        matrix[column] = [value / divisor for value in matrix[column]]
+
+        for row in range(8):
+            if row == column:
+                continue
+            factor = matrix[row][column]
+            matrix[row] = [
+                value - factor * pivot_value
+                for value, pivot_value in zip(matrix[row], matrix[column])
+            ]
+
+    return [matrix[row][8] for row in range(8)]
+
+
+def _compose_package_label(image: Image.Image, product: dict[str, Any], project: dict[str, Any], font_path: str) -> None:
+    label_image = Image.new("RGBA", (236, 390), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(label_image)
+    ink = (28, 32, 30, 225)
+    brand_font = _font(21, font_path)
+    body = _font(12, font_path)
+    draw.text((18, 8), _clip(product.get("brand", ""), 14), fill=ink, font=brand_font)
+    package_config = project.get("package_config", {}) if isinstance(project.get("package_config", {}), dict) else {}
+    certificate_config = project.get("certificate_config", {}) if isinstance(project.get("certificate_config", {}), dict) else {}
+    manufacturer_name = (
+        package_config.get("manufacturer_name")
+        or package_config.get("company_name")
+        or _company_name(product, certificate_config)
+    )
+    manufacturer_address = package_config.get("manufacturer_address") or package_config.get("address") or ""
+    rows = [
+        ("品牌", product.get("brand", "")),
+        ("品名", product.get("name", "")),
+        ("型号", product.get("model", "")),
+        ("材质", product.get("material", "")),
+        ("厂商", manufacturer_name),
+        ("地址", manufacturer_address),
+    ]
+    y = 64
+    for field_label, value in rows:
+        if value:
+            max_chars = 12 if field_label == "地址" else 14
+            draw.text((18, y), f"{field_label}: {_clip(value, max_chars)}", fill=ink, font=body)
+            y += 26
+    barcode = render_barcode_image(
+        BarcodeType(project["barcode_type"]),
+        project["barcode_value"],
+        width=236,
+        height=104,
+        draw_border=False,
+        transparent=True,
+    )
+    _tint_barcode_for_box(barcode)
+    label_image.alpha_composite(barcode, (0, max(y + 10, 278)))
+    _paste_printed_label(image, label_image, (194, 150))
+
+
+def _paste_printed_label(image: Image.Image, label: Image.Image, xy: tuple[int, int]) -> None:
+    base = image.convert("RGB")
+    printed = label.convert("RGBA")
+    base_pixels = base.load()
+    printed_pixels = printed.load()
+    offset_x, offset_y = xy
+
+    for y in range(printed.height):
+        base_y = offset_y + y
+        if base_y < 0 or base_y >= base.height:
+            continue
+        for x in range(printed.width):
+            base_x = offset_x + x
+            if base_x < 0 or base_x >= base.width:
+                continue
+
+            ink_r, ink_g, ink_b, ink_alpha = printed_pixels[x, y]
+            if ink_alpha <= 0:
+                continue
+
+            paper_r, paper_g, paper_b = base_pixels[base_x, base_y]
+            coverage = ink_alpha / 255
+            strength = min(0.72, coverage * 0.68)
+            fiber = (((base_x * 17 + base_y * 31) & 7) - 3) * coverage
+
+            multiplied = (
+                paper_r * ink_r / 255,
+                paper_g * ink_g / 255,
+                paper_b * ink_b / 255,
+            )
+            base_pixels[base_x, base_y] = (
+                _clamp_channel(paper_r * (1 - strength) + multiplied[0] * strength + fiber),
+                _clamp_channel(paper_g * (1 - strength) + multiplied[1] * strength + fiber),
+                _clamp_channel(paper_b * (1 - strength) + multiplied[2] * strength + fiber),
+            )
+
+    image.paste(base)
+
+
+def _clamp_channel(value: float) -> int:
+    return max(0, min(255, int(round(value))))
+
+
+def _paste_rgba_plain(base: Image.Image, overlay: Image.Image, xy: tuple[int, int]) -> None:
+    base_rgba = base.convert("RGBA")
+    base_rgba.alpha_composite(overlay, xy)
+    base.paste(base_rgba.convert("RGB"))
+
+
+def _draw_section_header(draw: ImageDraw.ImageDraw, y: int, text: str) -> None:
+    draw.rectangle((0, y, 800, y + 44), fill=(255, 255, 255))
+    draw.rectangle((48, y + 10, 56, y + 34), fill=(14, 116, 144))
+    draw.text((70, y + 4), text, fill=(15, 23, 42), font=_font(28))
+
+
+def _draw_panel(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], *, fill: tuple[int, int, int]) -> None:
+    draw.rectangle(box, fill=fill)
+
+
+def _draw_tag(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str, font: ImageFont.ImageFont) -> None:
+    x, y = xy
+    draw.rounded_rectangle((x, y, 750, y + 48), radius=8, fill=(255, 255, 255), outline=(203, 213, 225), width=1)
+    draw.text((x + 18, y + 11), text, fill=(51, 65, 85), font=font)
+
+
+def _draw_specs_table(
+    draw: ImageDraw.ImageDraw,
+    product: dict[str, Any],
+    box: tuple[int, int, int, int],
+    body: ImageFont.ImageFont,
+    small: ImageFont.ImageFont,
+) -> None:
+    x0, y0, x1, y1 = box
+    draw.rounded_rectangle(box, radius=8, fill="white", outline=(203, 213, 225), width=1)
+    draw.text((x0 + 20, y0 + 18), "确认规格", fill=(15, 23, 42), font=body)
+    rows = [("产品名称", product.get("name", "")), ("品牌", product.get("brand", "")), ("型号", product.get("model", ""))]
+    for item in product.get("specs", []):
+        rows.append((str(item.get("key", "")), f"{item.get('value', '')}{item.get('unit', '')}"))
+    y = y0 + 64
+    for label, value in rows[:7]:
+        draw.line((x0, y - 8, x1, y - 8), fill=(226, 232, 240), width=1)
+        draw.text((x0 + 18, y), _clip(label, 8), fill=(71, 85, 105), font=small)
+        draw.text((x0 + 128, y), _clip(value, 16), fill=(30, 41, 59), font=small)
+        y += 52
+
+
+def _draw_wrapped_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    xy: tuple[int, int],
+    font: ImageFont.ImageFont,
+    fill: tuple[int, int, int],
+    max_width: int,
+    line_height: int,
+    max_lines: int,
+) -> None:
+    x, y = xy
+    for line in _wrap_text(draw, str(text), font, max_width, max_lines):
+        draw.text((x, y), line, fill=fill, font=font)
+        y += line_height
+
+
+def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int, max_lines: int) -> list[str]:
+    lines: list[str] = []
+    current = ""
+    for char in text:
+        candidate = current + char
+        if current and draw.textlength(candidate, font=font) > max_width:
+            lines.append(current)
+            current = char
+            if len(lines) == max_lines:
+                return lines
+        else:
+            current = candidate
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    return lines
+
+
+def _paste_cover(canvas: Image.Image, source: Image.Image, box: tuple[int, int, int, int]) -> None:
+    x0, y0, x1, y1 = box
+    fitted = ImageOps.fit(source.convert("RGB"), (x1 - x0, y1 - y0), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+    canvas.paste(fitted, (x0, y0))
+
+
+def _fit_width(source: Image.Image, width: int) -> Image.Image:
+    image = source.convert("RGB")
+    if image.width == width:
+        return image.copy()
+    height = max(1, round(image.height * (width / image.width)))
+    return image.resize((width, height), resample=Image.Resampling.LANCZOS)
+
+
+def _sales_points(product: dict[str, Any], project: dict[str, Any], limit: int) -> list[str]:
+    config = project.get("detail_config", {}) if isinstance(project.get("detail_config", {}), dict) else {}
+    points = [str(point) for point in config.get("selling_points", []) if str(point).strip()]
+    if not points:
+        points = [product.get("material", ""), product.get("color", "")]
+    return [point for point in points if point][:limit]
+
+
+def _paste_rgba_with_shadow(base: Image.Image, overlay: Image.Image, xy: tuple[int, int]) -> None:
+    base_rgba = base.convert("RGBA")
+    alpha = overlay.getchannel("A")
+    shadow_alpha = alpha.filter(ImageFilter.GaussianBlur(8))
+    shadow = Image.new("RGBA", overlay.size, (0, 0, 0, 90))
+    shadow.putalpha(shadow_alpha)
+    base_rgba.alpha_composite(shadow, (xy[0] + 9, xy[1] + 12))
+    base_rgba.alpha_composite(overlay, xy)
+    base.paste(base_rgba.convert("RGB"))
+
+
+def _tint_barcode_for_box(barcode: Image.Image) -> None:
+    pixels = barcode.load()
+    for y in range(barcode.height):
+        for x in range(barcode.width):
+            r, g, b, a = pixels[x, y]
+            if a == 0:
+                continue
+            if r < 80 and g < 80 and b < 80:
+                pixels[x, y] = (24, 24, 20, 210)
+            else:
+                pixels[x, y] = (192, 151, 101, 42)
+
+
+def _font(size: int, font_path: str = "") -> ImageFont.ImageFont:
+    candidates = [
+        font_path,
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _clip(value: object, length: int) -> str:
+    text = str(value or "")
+    return text[:length]
+
+
+def _spec_model_text(product: dict[str, Any]) -> str:
+    model = str(product.get("model", "") or "")
+    specs = _spec_text(product)
+    if not specs:
+        return model
+    return f"{model} / {specs}" if model else specs
+
+
+def _spec_text(product: dict[str, Any]) -> str:
+    specs = product.get("specs", [])
+    if not specs:
+        return ""
+    return " / ".join(f"{item.get('key', '')}: {item.get('value', '')}{item.get('unit', '')}" for item in specs)
+
+
+def _date_text(value: object) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 10:
+        return text[:10]
+    return date.today().isoformat()
+
+
+def _company_name(product: dict[str, Any], certificate_config: dict[str, Any]) -> str:
+    return str(
+        certificate_config.get("company_name")
+        or product.get("company_name")
+        or product.get("manufacturer")
+        or product.get("manufacturer_name")
+        or product.get("brand")
+        or ""
+    )
