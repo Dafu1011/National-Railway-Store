@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createOutputPreviews, type OutputResponse } from "./outputPreviews";
+import { createOutputPreviews, outputPreviewDownloadPath, type OutputResponse } from "./outputPreviews";
 
 describe("output previews", () => {
   it("downloads and sorts partial generation outputs in business order", async () => {
@@ -59,5 +59,18 @@ describe("output previews", () => {
     );
 
     expect(previews.map((preview) => preview.id)).toEqual(["available-output-id"]);
+  });
+
+  it("uses gallery thumbnails for previews when the API provides them", () => {
+    const output: OutputResponse = {
+      id: "thumb-output-id",
+      output_type: "detail",
+      width: 800,
+      height: 2400,
+      quality_status: "passed",
+      thumbnail_url: "/api/v1/outputs/thumb-output-id/thumbnail",
+    };
+
+    expect(outputPreviewDownloadPath(output)).toBe("/outputs/thumb-output-id/thumbnail");
   });
 });

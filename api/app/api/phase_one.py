@@ -11,7 +11,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -884,18 +884,17 @@ async def list_project_outputs(
 
 @router.get("/gallery/outputs")
 async def list_gallery_outputs(
+    limit: int = Query(30, ge=1, le=60),
+    cursor: str | None = Query(None),
     user: dict[str, Any] = Depends(current_user),
     storage: AppStorage = Depends(get_storage),
-    runtime_services: Any = Depends(get_runtime_services),
 ) -> dict[str, Any]:
     # Gallery history is account-scoped: every output row is filtered by the authenticated user's id.
-    cache_key = gallery_cache_key(user["id"])
-    cached = runtime_services.get_cache_json(cache_key)
-    if cached is not None:
-        return cached
-    payload = {"items": list_outputs(storage, user_id=user["id"], passed_only=True, newest_first=True)}
-    runtime_services.set_cache_json(cache_key, payload, ttl_seconds=30)
-    return payload
+    offset = gallery_cursor_offset(cursor)
+    rows = list_outputs(storage, user_id=user["id"], passed_only=True, newest_first=True, limit=limit + 1, offset=offset)
+    items = rows[:limit]
+    next_cursor = str(offset + limit) if len(rows) > limit else None
+    return {"items": items, "next_cursor": next_cursor}
 
 
 @router.get("/outputs/{output_id}/download")
@@ -912,7 +911,35 @@ async def download_output(
     path = Path(output["file_path"])
     if not path.exists():
         raise_error(status.HTTP_404_NOT_FOUND, "OUTPUT_FILE_NOT_FOUND", "杈撳嚭鏂囦欢涓嶅瓨鍦ㄣ€?")
-    return FileResponse(path, media_type="image/png", filename=f"{output['output_type']}.png")
+    return FileResponse(
+        path,
+        media_type="image/png",
+        filename=f"{output['output_type']}.png",
+        headers=output_cache_headers(output),
+    )
+
+
+@router.get("/outputs/{output_id}/thumbnail")
+async def thumbnail_output(
+    output_id: str,
+    user: dict[str, Any] = Depends(current_user),
+    storage: AppStorage = Depends(get_storage),
+) -> FileResponse:
+    output = get_owned_row(storage, "generation_outputs", output_id, user["id"])
+    if output is None:
+        raise_access_denied()
+    if output["quality_status"] != "passed":
+        raise_error(status.HTTP_409_CONFLICT, "QUALITY_REVIEW_REQUIRED", "璐ㄦ鏈€氳繃鐨勫浘鐗囦笉鑳戒笅杞姐€?")
+    path = Path(output["file_path"])
+    if not path.exists():
+        raise_error(status.HTTP_404_NOT_FOUND, "OUTPUT_FILE_NOT_FOUND", "杈撳嚭鏂囦欢涓嶅瓨鍦ㄣ€?")
+    thumbnail_path = ensure_output_thumbnail(path)
+    return FileResponse(
+        thumbnail_path,
+        media_type="image/png",
+        filename=f"{output['output_type']}-thumb.png",
+        headers=output_cache_headers(output),
+    )
 
 
 def public_user(user: dict[str, Any]) -> dict[str, Any]:
@@ -1611,6 +1638,8 @@ def list_outputs(
     job_id: str | None = None,
     passed_only: bool = False,
     newest_first: bool = False,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     clauses = ["user_id = ?"]
     params: list[Any] = [user_id]
@@ -1623,6 +1652,10 @@ def list_outputs(
     if passed_only:
         clauses.append("quality_status = 'passed'")
     created_order = "DESC" if newest_first else "ASC"
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = "LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
     with storage.connect() as connection:
         rows = connection.execute(
             f"""
@@ -1637,10 +1670,47 @@ def list_outputs(
                     WHEN 'scene' THEN 5
                     ELSE 99
                 END
+            {limit_sql}
             """,
             params,
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [output_payload(dict(row)) for row in rows]
+
+
+def output_payload(row: dict[str, Any]) -> dict[str, Any]:
+    output_id = row["id"]
+    row["download_url"] = f"/api/v1/outputs/{output_id}/download"
+    row["thumbnail_url"] = f"/api/v1/outputs/{output_id}/thumbnail"
+    return row
+
+
+def gallery_cursor_offset(cursor: str | None) -> int:
+    if cursor is None or cursor == "":
+        return 0
+    try:
+        offset = int(cursor)
+    except ValueError:
+        raise_error(status.HTTP_400_BAD_REQUEST, "INVALID_GALLERY_CURSOR", "Invalid gallery cursor.")
+    if offset < 0:
+        raise_error(status.HTTP_400_BAD_REQUEST, "INVALID_GALLERY_CURSOR", "Invalid gallery cursor.")
+    return offset
+
+
+def ensure_output_thumbnail(path: Path) -> Path:
+    thumbnail_path = path.with_name(f"{path.stem}.thumb.png")
+    if thumbnail_path.exists() and thumbnail_path.stat().st_mtime >= path.stat().st_mtime:
+        return thumbnail_path
+    with Image.open(path) as image:
+        thumbnail = ImageOps.contain(image.convert("RGB"), (320, 320), method=Image.Resampling.LANCZOS)
+        thumbnail.save(thumbnail_path, format="PNG", optimize=True)
+    return thumbnail_path
+
+
+def output_cache_headers(output: dict[str, Any]) -> dict[str, str]:
+    return {
+        "Cache-Control": "private, max-age=86400",
+        "ETag": f"\"{output['id']}-{output.get('version', 1)}\"",
+    }
 
 
 def record_existing_output_files(

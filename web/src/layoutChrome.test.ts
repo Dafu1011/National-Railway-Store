@@ -26,9 +26,13 @@ describe("layout chrome", () => {
     expect(appSource).not.toContain('href="#outputs">输出');
   });
   it("loads gallery from the current account history instead of the active preview list", () => {
-    expect(appSource).toContain('apiGet<ProjectOutputsResponse>("/gallery/outputs"');
+    expect(appSource).toContain('apiGet<ProjectOutputsResponse>(galleryOutputsPath');
     expect(appSource).toContain("galleryPreviews");
     expect(appSource).toContain("dataSource={galleryPreviews}");
+    expect(appSource).toContain("if (galleryLoaded) {");
+    expect(appSource).toContain("outputPreviewDownloadPath(output)");
+    expect(appSource).toContain("next_cursor");
+    expect(appSource).toContain("loadGallery({ append: true })");
   });
   it("adds an account page for balance and customer-service recharge", () => {
     expect(appSource).toContain('apiGet<AccountResponse>("/account/me"');

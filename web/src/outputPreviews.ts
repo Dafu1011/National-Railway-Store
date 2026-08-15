@@ -4,6 +4,8 @@ export type OutputResponse = {
   width: number;
   height: number;
   quality_status: string;
+  download_url?: string;
+  thumbnail_url?: string;
 };
 
 export type PreviewImage = OutputResponse & {
@@ -35,7 +37,15 @@ export function sortOutputs(outputs: PreviewImage[]): PreviewImage[] {
   return [...outputs].sort((left, right) => outputRank(left.output_type, order) - outputRank(right.output_type, order));
 }
 
+export function outputPreviewDownloadPath(output: OutputResponse): string {
+  return normalizeApiPath(output.thumbnail_url || output.download_url || `/outputs/${output.id}/download`);
+}
+
 function outputRank(outputType: string, order: string[]): number {
   const index = order.indexOf(outputType);
   return index === -1 ? 999 : index;
+}
+
+function normalizeApiPath(path: string): string {
+  return path.startsWith("/api/v1") ? path.slice("/api/v1".length) : path;
 }

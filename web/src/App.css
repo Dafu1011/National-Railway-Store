@@ -655,6 +655,12 @@ button:focus-visible,
   min-height: 220px;
 }
 
+.gallery-load-more {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 2px;
+}
+
 .account-page {
   position: relative;
   z-index: 1;

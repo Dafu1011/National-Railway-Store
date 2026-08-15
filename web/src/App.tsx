@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import {
   Alert,
@@ -50,7 +50,7 @@ import { buildProjectCreatePayload } from "./generationPayload";
 import { buildProductCreatePayload, type ProductPayloadValues } from "./productPayload";
 import { generationErrorMessage } from "./generationErrors";
 import { pageForAuthState } from "./navigation";
-import { createOutputPreviews, type OutputResponse, type PreviewImage } from "./outputPreviews";
+import { createOutputPreviews, outputPreviewDownloadPath, type OutputResponse, type PreviewImage } from "./outputPreviews";
 import {
   authErrorMessage,
   restoreAuthFromRefresh,
@@ -109,6 +109,7 @@ type GenerationResponse = {
 
 type ProjectOutputsResponse = {
   items: OutputResponse[];
+  next_cursor?: string | null;
 };
 
 type AccountResponse = {
@@ -594,6 +595,8 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
   const [galleryPreviews, setGalleryPreviews] = useState<PreviewImage[]>([]);
   const [galleryLoading, setGalleryLoading] = useState(false);
   const [galleryLoaded, setGalleryLoaded] = useState(false);
+  const [galleryCursor, setGalleryCursor] = useState<string | null>(null);
+  const galleryPreviewsRef = useRef<PreviewImage[]>([]);
   const [account, setAccount] = useState<AccountResponse | null>(null);
   const [accountTransactions, setAccountTransactions] = useState<AccountTransaction[]>([]);
   const [accountLoading, setAccountLoading] = useState(false);
@@ -627,8 +630,12 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
   }, [previews]);
 
   useEffect(() => {
-    return () => galleryPreviews.forEach((preview) => URL.revokeObjectURL(preview.url));
+    galleryPreviewsRef.current = galleryPreviews;
   }, [galleryPreviews]);
+
+  useEffect(() => {
+    return () => galleryPreviewsRef.current.forEach((preview) => URL.revokeObjectURL(preview.url));
+  }, []);
 
   useEffect(() => {
     if (!productImagePreviewUrl) {
@@ -653,18 +660,29 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
     setProductImagePreviewUrl("");
   }
 
-  async function loadGallery() {
+  async function loadGallery(options: { append?: boolean } = {}) {
     setGalleryLoading(true);
     try {
-      const galleryOutputs = await apiGet<ProjectOutputsResponse>("/gallery/outputs", { token });
+      const cursor = options.append ? galleryCursor : null;
+      if (options.append && !cursor) {
+        return;
+      }
+      const galleryOutputsPath = `/gallery/outputs?limit=30${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+      const galleryOutputs = await apiGet<ProjectOutputsResponse>(galleryOutputsPath, { token });
       const previewImages = await createOutputPreviews(
         galleryOutputs.items,
-        (output) => apiDownload(`/outputs/${output.id}/download`, { token }),
+        (output) => apiDownload(outputPreviewDownloadPath(output), { token }),
         (blob) => URL.createObjectURL(blob),
         { preserveOrder: true, ignoreDownloadErrors: true },
       );
-      galleryPreviews.forEach((preview) => URL.revokeObjectURL(preview.url));
-      setGalleryPreviews(previewImages);
+      setGalleryPreviews((current) => {
+        if (options.append) {
+          return [...current, ...previewImages];
+        }
+        current.forEach((preview) => URL.revokeObjectURL(preview.url));
+        return previewImages;
+      });
+      setGalleryCursor(galleryOutputs.next_cursor ?? null);
       setGalleryLoaded(true);
     } catch (error) {
       message.error(generationErrorMessage(error));
@@ -675,7 +693,35 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
 
   async function openGallery() {
     setActiveWorkbenchPage("gallery");
+    if (galleryLoaded) {
+      return;
+    }
     await loadGallery();
+  }
+
+  function resetGalleryCache() {
+    setGalleryPreviews((current) => {
+      current.forEach((preview) => URL.revokeObjectURL(preview.url));
+      return [];
+    });
+    setGalleryCursor(null);
+    setGalleryLoaded(false);
+  }
+
+  async function downloadOriginalOutput(output: OutputResponse) {
+    try {
+      const blob = await apiDownload(`/outputs/${output.id}/download`, { token });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${output.output_type}.png`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      message.error(generationErrorMessage(error));
+    }
   }
 
   async function loadAccount() {
@@ -780,6 +826,7 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
         (blob) => URL.createObjectURL(blob),
       );
       setPreviews(previewImages);
+      resetGalleryCache();
       message.success("五图已生成，可预览和下载");
     } catch (error) {
       const displayMessage = generationErrorMessage(error);
@@ -1136,9 +1183,10 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
             </div>
             <Tag className="soft-tag">{galleryPreviews.length} 张图片</Tag>
           </div>
-          {galleryLoading ? (
+          {galleryLoading && galleryPreviews.length === 0 ? (
             <Alert type="info" showIcon message="正在加载图库" description="正在读取当前账号下已经生成过的商品图。" />
           ) : galleryPreviews.length === 0 ? null : (
+            <>
             <List
               grid={{ gutter: 14, xs: 1, sm: 2, lg: 4 }}
               dataSource={galleryPreviews}
@@ -1159,7 +1207,7 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
                       <Text type="secondary">
                         {item.width} x {item.height}
                       </Text>
-                      <Button href={item.url} download={`${item.output_type}.png`} size="small" icon={<Download size={14} />}>
+                      <Button onClick={() => void downloadOriginalOutput(item)} size="small" icon={<Download size={14} />}>
                         下载
                       </Button>
                     </div>
@@ -1167,6 +1215,14 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
                 </List.Item>
               )}
             />
+            {galleryCursor ? (
+              <div className="gallery-load-more">
+                <Button loading={galleryLoading} onClick={() => void loadGallery({ append: true })}>
+                  鍔犺浇鏇村
+                </Button>
+              </div>
+            ) : null}
+            </>
           )}
         </section>
       ) : null}

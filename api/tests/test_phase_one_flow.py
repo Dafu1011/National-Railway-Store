@@ -716,6 +716,38 @@ class PhaseOneFlowTests(unittest.TestCase):
                 self.assertEqual(bob_gallery_ids, bob_output_ids)
                 self.assertTrue(alice_gallery_ids.isdisjoint(bob_output_ids))
 
+    def test_gallery_outputs_are_paginated_and_use_cached_thumbnails(self):
+        with TemporaryDirectory() as data_dir:
+            app = create_app(data_dir=data_dir)
+            with TestClient(app) as client:
+                token = verified_token(client, "gallery-thumbs@example.com")
+                headers = {"Authorization": f"Bearer {token}"}
+                generate_mock_project(client, headers, "Gallery Thumbnail Cup")
+
+                first_page = client.get("/api/v1/gallery/outputs?limit=2", headers=headers)
+                self.assertEqual(first_page.status_code, 200)
+                first_payload = first_page.json()
+                self.assertEqual(len(first_payload["items"]), 2)
+                self.assertEqual(first_payload["next_cursor"], "2")
+
+                first_item = first_payload["items"][0]
+                self.assertEqual(first_item["thumbnail_url"], f"/api/v1/outputs/{first_item['id']}/thumbnail")
+                self.assertEqual(first_item["download_url"], f"/api/v1/outputs/{first_item['id']}/download")
+
+                thumbnail = client.get(first_item["thumbnail_url"], headers=headers)
+                self.assertEqual(thumbnail.status_code, 200)
+                self.assertEqual(thumbnail.headers["content-type"], "image/png")
+                self.assertIn("private", thumbnail.headers["cache-control"])
+                with Image.open(BytesIO(thumbnail.content)) as image:
+                    self.assertLessEqual(max(image.size), 320)
+
+                second_page = client.get("/api/v1/gallery/outputs?limit=2&cursor=2", headers=headers)
+                self.assertEqual(second_page.status_code, 200)
+                second_payload = second_page.json()
+                self.assertEqual(len(second_payload["items"]), 2)
+                self.assertEqual(second_payload["next_cursor"], "4")
+                self.assertTrue({item["id"] for item in first_payload["items"]}.isdisjoint({item["id"] for item in second_payload["items"]}))
+
     def test_generation_rejects_when_user_active_job_limit_is_reached(self):
         original_env = {
             "APP_ENV": os.environ.get("APP_ENV"),
