@@ -96,8 +96,17 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
     )
     package_address = package_config.get("manufacturer_address") or package_config.get("address") or ""
     package_rows = _package_information_rows(product, package_manufacturer, package_address)
+    package_brand = _clean_text(product.get("brand", ""))
+    package_brand_wordmark = (
+        "Package brand rendering rule: render the brand value only as a large standalone brand wordmark on the carton front; "
+        "brand value only, never render the field label Brand, brand, 品牌, or 品牌： before it. "
+        "The standalone brand wordmark must be much larger than the ordinary information rows, occupy more pixels, use clear regular-weight strokes rather than heavy bold strokes, and maximize stroke fidelity for complex Chinese characters. "
+        "Do not squeeze, merge, simplify, substitute, or pseudo-render any brand character. "
+        f"Standalone carton brand wordmark text: {package_brand}. "
+        if package_brand
+        else "No standalone carton brand wordmark is needed because the user did not enter a brand. "
+    )
     package_fact_rows = [
-        ("brand", product.get("brand", "")),
         ("product name", product.get("name", "")),
         ("model", product.get("model", "")),
         ("material", product.get("material", "")),
@@ -108,7 +117,7 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
     ]
     package_text_layout = (
         "Candidate package front text layout, printed directly by the image model as native ink on the carton, "
-        "using only non-empty user-entered rows in this Chinese label order: "
+        "using only non-empty user-entered ordinary information rows in this Chinese label order, excluding the brand row because the brand is rendered separately as the large wordmark: "
         f"{_format_chinese_rows(package_rows)} "
     )
     package_facts = (
@@ -198,6 +207,7 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
             "The carton front face must be clearly visible and front face nearly parallel to the camera. The front print zone must be almost square-on to the camera, flat and stable enough for direct model-rendered package printing. carton front must be straight-on enough that model-generated native printing does not look tilted. avoid perspective that makes upright package text look crooked. Keep the front-face vertical side edges straight and nearly vertical, and keep horizontal package baselines level. Avoid strong perspective, slanted front faces, twisted cartons, diagonal front panels, trapezoid print zones, excessive convergence, or a carton that appears to rotate away from the viewer. "
             "The visible carton side face may show only natural kraft cardboard and structural folds. It must be a plain unmarked side face with no side icons, side logos, side badges, side symbols, or side markings, no decorative side graphics, no unrelated warning marks, and no random printed elements. "
             "The carton front must have no front rectangular frame, no bordered front panel, no printed box outline, and no unnecessary graphic border. model must directly print the package text and barcode on the carton as native ink on kraft cardboard, not as a floating sticker, not as an overlay, and not as a separate label. "
+            + package_brand_wordmark
             + package_facts
             + package_text_layout
             + "On the package, print only user-entered fields that match the visible uploaded product. If a user-entered value conflicts with the visible product category, structure, or appearance, omit that row rather than printing incorrect product information. Do not show capacity, volume, material, product name, model, brand, or specification values that belong to another product type; do not invent replacement values. Render only the selected compatible Chinese and Latin characters from the package information. no garbled characters, no pseudo text, no random English replacement words, no hallucinated brand, no duplicate text blocks, no unrelated product facts, and no invented labels. Keep all package text upright, level, evenly spaced, and aligned like normal package printing. The text must read upright relative to the carton front; it should share the carton front's vertical axis and horizontal baseline, with no diagonal drift and no perspective mismatch. "
@@ -235,7 +245,6 @@ def _package_information_rows(
     manufacturer_address: object,
 ) -> list[tuple[str, str]]:
     return [
-        ("品牌", _clean_text(product.get("brand", ""))),
         ("品名", _clean_text(product.get("name", ""))),
         ("型号", _clean_text(product.get("model", ""))),
         ("材质", _clean_text(product.get("material", ""))),
@@ -256,9 +265,9 @@ def _format_fact_rows(rows: list[tuple[str, object]]) -> str:
 
 def _detail_module_prompts(product: dict[str, Any]) -> list[str]:
     name = product.get("name", "the uploaded product")
+    brand = _clean_text(product.get("brand", ""))
     fact_text = _format_fact_rows(
         [
-            ("brand", product.get("brand", "")),
             ("product", name),
             ("model", product.get("model", "")),
             ("material", product.get("material", "")),
@@ -281,11 +290,21 @@ def _detail_module_prompts(product: dict[str, Any]) -> list[str]:
         "If a fact was not entered by the user, omit that label completely; the model may infer visual feature illustrations from the real uploaded product appearance, but must not present inferred values as structured specifications. "
         "Do not add logos that are not on the product, machine-readable codes, watermarks, or certificate-like labels. "
     )
+    first_brand_instruction = (
+        f"Use the brand only in this first detail module as a large artistic brand wordmark, brand: {brand}. "
+        "The brand wordmark should be large enough to occupy many pixels, use clear regular-weight strokes rather than heavy bold strokes, and maximize Chinese stroke fidelity for complex characters. "
+        "It may be styled as tasteful artistic typography, but do not distort, simplify, merge, substitute, or pseudo-render any brand character. "
+        if brand
+        else "Do not add a brand wordmark because the user did not enter a brand. "
+    )
+    no_repeat_brand_instruction = (
+        "Do not repeat the brand name or brand wordmark as readable text in this section; only preserve visible product logos or markings that physically exist on the uploaded product. "
+    )
     return [
-        base + f"detail module: product hero finished ecommerce detail section for {name}. Strong opening banner, complete product facing the same branded side as the source image, clean premium ecommerce style.",
-        base + f"detail module: product-only feature section for {name}. Show the same product on a white or light neutral surface, with the branded side and exact logo markings still visible, no lifestyle environment.",
-        base + f"detail module: close-up detail finished ecommerce detail section for {name}. Macro-style product details showing material, opening, lid, finish, texture, bottom, seam, or key feature, plus a small full-product view with the exact logo and registered mark visible.",
-        base + f"detail module: structure and scale visual reference finished ecommerce detail section for {name}. Product angles and visual scale cues may be integrated when they come from the uploaded product appearance, while preserving the exact logo and registered mark on every visible product.",
+        base + first_brand_instruction + f"detail module: product hero finished ecommerce detail section for {name}. Strong opening banner, complete product facing the same branded side as the source image, clean premium ecommerce style.",
+        base + no_repeat_brand_instruction + f"detail module: product-only feature section for {name}. Show the same product on a white or light neutral surface, with the branded side and exact logo markings still visible, no lifestyle environment.",
+        base + no_repeat_brand_instruction + f"detail module: close-up detail finished ecommerce detail section for {name}. Macro-style product details showing material, opening, lid, finish, texture, bottom, seam, or key feature, plus a small full-product view with the exact logo and registered mark visible.",
+        base + no_repeat_brand_instruction + f"detail module: structure and scale visual reference finished ecommerce detail section for {name}. Product angles and visual scale cues may be integrated when they come from the uploaded product appearance, while preserving the exact logo and registered mark on every visible product.",
     ]
 
 
