@@ -100,8 +100,9 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
     package_brand_wordmark = (
         "Package brand rendering rule: render the brand value only as a large standalone brand wordmark on the carton front; "
         "brand value only, never render the field label Brand, brand, 品牌, or 品牌： before it. "
-        "The standalone brand wordmark must be much larger than the ordinary information rows, occupy more pixels, use clear regular-weight strokes rather than heavy bold strokes, and maximize stroke fidelity for complex Chinese characters. "
-        "Do not squeeze, merge, simplify, substitute, or pseudo-render any brand character. "
+        "Render it as large standard printed Chinese brand text, plain regular-weight Songti/Heiti-style characters, not artistic typography, not calligraphy, not brush style, not decorative typography, not a stylized logo redesign. "
+        "The standalone brand wordmark must be much larger than the ordinary information rows and occupy more pixels. character correctness and complete stroke structure are more important than sharpness; slight softness or mild ink blur is acceptable. "
+        "Do not squeeze, merge, simplify, substitute, pseudo-render, split, connect, warp, or decorate any brand character. Preserve every radical, stroke order impression, inner gap, and complete Chinese stroke structure as faithfully as possible. "
         f"Standalone carton brand wordmark text: {package_brand}. "
         if package_brand
         else "No standalone carton brand wordmark is needed because the user did not enter a brand. "
@@ -291,9 +292,10 @@ def _detail_module_prompts(product: dict[str, Any]) -> list[str]:
         "Do not add logos that are not on the product, machine-readable codes, watermarks, or certificate-like labels. "
     )
     first_brand_instruction = (
-        f"Use the brand only in this first detail module as a large artistic brand wordmark, brand: {brand}. "
-        "The brand wordmark should be large enough to occupy many pixels, use clear regular-weight strokes rather than heavy bold strokes, and maximize Chinese stroke fidelity for complex characters. "
-        "It may be styled as tasteful artistic typography, but do not distort, simplify, merge, substitute, or pseudo-render any brand character. "
+        f"Use the brand only in this first detail module as large standard printed Chinese brand text, brand: {brand}. "
+        "Use plain regular-weight Songti/Heiti-style characters, not artistic typography, not calligraphy, not brush style, not decorative typography, and not a stylized logo redesign. "
+        "The brand text should be large enough to occupy many pixels. character correctness and complete stroke structure are more important than sharpness; slight softness or mild ink blur is acceptable. "
+        "Do not distort, simplify, merge, substitute, pseudo-render, split, connect, warp, or decorate any brand character. Preserve every radical, stroke order impression, inner gap, and complete Chinese stroke structure as faithfully as possible. "
         if brand
         else "Do not add a brand wordmark because the user did not enter a brand. "
     )
