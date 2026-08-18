@@ -20,4 +20,10 @@ describe("generation error UX", () => {
     expect(message).toContain("可乐请求超时");
     expect(message).toContain("稍后重试");
   });
+
+  it("shows output file errors in readable Chinese even when the backend message is mojibake", () => {
+    const message = generationErrorMessage(new Error("OUTPUT_FILE_NOT_FOUND: 杈撳嚭鏂囦欢涓嶅瓨鍦ㄣ€?"));
+
+    expect(message).toBe("图片文件不存在，可能是服务器历史记录指向的原图文件已被移动或删除。");
+  });
 });

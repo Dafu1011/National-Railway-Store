@@ -376,6 +376,9 @@ class AppStorage:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_generation_billing_holds_user_status ON generation_billing_holds(user_id, status)"
             )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_generation_outputs_gallery ON generation_outputs(user_id, quality_status, created_at DESC, id DESC)"
+            )
             connection.execute("UPDATE users SET email_normalized = lower(email) WHERE email_normalized IS NULL")
             connection.execute(
                 "UPDATE users SET status = 'active', email_verified_at = COALESCE(email_verified_at, CAST(CURRENT_TIMESTAMP AS TEXT)) WHERE status IS NULL OR status = ''"

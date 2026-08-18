@@ -1,7 +1,12 @@
+const { spawn } = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const https = require("node:https");
+const os = require("node:os");
 const path = require("node:path");
+const { Readable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 
 const DEFAULT_API_BASE_URL = "http://124.174.70.182:8088";
 const LOCAL_API_CANDIDATES = [DEFAULT_API_BASE_URL];
@@ -203,8 +208,10 @@ function resolveStaticCandidate(requestUrl, distDir) {
 }
 
 async function startElectronApp() {
-  const { BrowserWindow, app, shell } = require("electron");
+  const { BrowserWindow, app, ipcMain, shell } = require("electron");
   let rendererServer = null;
+
+  registerUpdateIpc({ app, ipcMain });
 
   async function createMainWindow() {
     const windowOptions = {
@@ -218,6 +225,7 @@ async function startElectronApp() {
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
+        preload: path.join(__dirname, "preload.cjs"),
         sandbox: true,
       },
     };
@@ -276,13 +284,17 @@ if (require.main === module) {
 }
 
 module.exports = {
+  buildUpdateDownloadUrl,
   buildProxyTarget,
   createRendererServer,
+  downloadUpdateInstaller,
   isSafeExternalUrl,
+  launchInstaller,
   normalizeApiBaseUrl,
   resolveWindowIconPath,
   resolveApiBaseUrl,
   resolveStaticCandidate,
+  sha256File,
 };
 
 function isSafeExternalUrl(rawUrl) {
@@ -291,5 +303,148 @@ function isSafeExternalUrl(rawUrl) {
     return url.protocol === "http:" || url.protocol === "https:";
   } catch {
     return false;
+  }
+}
+
+function registerUpdateIpc({ app, ipcMain }) {
+  ipcMain.handle("updates:get-app-version", () => app.getVersion());
+  ipcMain.handle("updates:install", async (_event, update) => {
+    const installerPath = await downloadUpdateInstaller(update, { appModule: app });
+    launchInstaller(installerPath);
+    app.quit();
+    return { installer_path: installerPath, launched: true };
+  });
+}
+
+function buildUpdateDownloadUrl(downloadUrl, apiBaseUrl = process.env.ZHIFENG_API_BASE_URL) {
+  const apiOrigin = normalizeApiBaseUrl(apiBaseUrl);
+  const targetUrl = new URL(downloadUrl, apiOrigin);
+  const apiUrl = new URL(apiOrigin);
+
+  if (targetUrl.protocol !== "http:" && targetUrl.protocol !== "https:") {
+    throw new Error("Update download URL must use http or https.");
+  }
+  if (targetUrl.origin !== apiUrl.origin) {
+    throw new Error("Update download URL must stay on the configured API origin.");
+  }
+
+  return targetUrl.toString();
+}
+
+async function downloadUpdateInstaller(
+  update,
+  {
+    apiBaseUrl = process.env.ZHIFENG_API_BASE_URL,
+    appModule,
+    fetchImpl = globalThis.fetch,
+  } = {},
+) {
+  const payload = normalizeUpdatePayload(update);
+  if (typeof fetchImpl !== "function") {
+    throw new Error("Update downloads require fetch support in the Electron main process.");
+  }
+  const downloadUrl = buildUpdateDownloadUrl(payload.download_url, apiBaseUrl);
+  const response = await fetchImpl(downloadUrl);
+  if (!response || !response.ok) {
+    throw new Error(`Update download failed with HTTP ${response ? response.status : "unknown"}.`);
+  }
+
+  const updatesDir = resolveUpdatesDirectory(appModule);
+  fs.mkdirSync(updatesDir, { recursive: true });
+  const installerPath = path.join(updatesDir, installerFileName(payload));
+
+  try {
+    await writeResponseBodyToFile(response, installerPath);
+    assertDownloadedFileSize(installerPath, payload.file_size_bytes);
+    assertDownloadedFileSha256(installerPath, payload.sha256);
+    return installerPath;
+  } catch (error) {
+    fs.rmSync(installerPath, { force: true });
+    throw error;
+  }
+}
+
+function normalizeUpdatePayload(update) {
+  if (!update || typeof update !== "object") {
+    throw new Error("Update payload is required.");
+  }
+  if (typeof update.download_url !== "string" || !update.download_url.trim()) {
+    throw new Error("Update download URL is required.");
+  }
+  if (typeof update.latest_version !== "string" || !update.latest_version.trim()) {
+    throw new Error("Update latest version is required.");
+  }
+
+  return {
+    download_url: update.download_url.trim(),
+    latest_version: update.latest_version.trim(),
+    sha256: typeof update.sha256 === "string" ? update.sha256.trim() : "",
+    file_size_bytes: Number(update.file_size_bytes || 0),
+    platform: typeof update.platform === "string" ? update.platform.trim() : "windows",
+    arch: typeof update.arch === "string" ? update.arch.trim() : "x64",
+  };
+}
+
+function resolveUpdatesDirectory(appModule) {
+  if (appModule && typeof appModule.getPath === "function") {
+    return path.join(appModule.getPath("userData"), "updates");
+  }
+  return path.join(os.tmpdir(), "zhifeng-image-updates");
+}
+
+async function writeResponseBodyToFile(response, filePath) {
+  if (!response.body) {
+    const buffer = Buffer.from(await response.arrayBuffer());
+    fs.writeFileSync(filePath, buffer);
+    return;
+  }
+
+  const readable = typeof response.body.pipe === "function" ? response.body : Readable.fromWeb(response.body);
+  await pipeline(readable, fs.createWriteStream(filePath));
+}
+
+function assertDownloadedFileSize(filePath, expectedSize) {
+  if (!Number.isFinite(expectedSize) || expectedSize <= 0) {
+    return;
+  }
+  const actualSize = fs.statSync(filePath).size;
+  if (actualSize !== expectedSize) {
+    throw new Error(`Update installer size mismatch: expected ${expectedSize}, received ${actualSize}.`);
+  }
+}
+
+function assertDownloadedFileSha256(filePath, expectedSha256) {
+  if (!expectedSha256) {
+    return;
+  }
+  const actualSha256 = sha256File(filePath);
+  if (actualSha256.toLowerCase() !== expectedSha256.toLowerCase()) {
+    throw new Error("Update installer checksum mismatch.");
+  }
+}
+
+function sha256File(filePath) {
+  const hash = crypto.createHash("sha256");
+  hash.update(fs.readFileSync(filePath));
+  return hash.digest("hex");
+}
+
+function installerFileName(update) {
+  const version = sanitizeFileNamePart(update.latest_version);
+  const arch = sanitizeFileNamePart(update.arch || "x64");
+  return `zhifeng-image-${version}-${arch}.exe`;
+}
+
+function sanitizeFileNamePart(value) {
+  return String(value || "release").replace(/[^a-zA-Z0-9._-]/g, "-");
+}
+
+function launchInstaller(installerPath, spawnImpl = spawn) {
+  const child = spawnImpl(installerPath, [], {
+    detached: true,
+    stdio: "ignore",
+  });
+  if (child && typeof child.unref === "function") {
+    child.unref();
   }
 }

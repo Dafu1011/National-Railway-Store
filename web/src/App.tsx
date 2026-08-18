@@ -50,13 +50,25 @@ import { buildProjectCreatePayload } from "./generationPayload";
 import { buildProductCreatePayload, type ProductPayloadValues } from "./productPayload";
 import { generationErrorMessage } from "./generationErrors";
 import { pageForAuthState } from "./navigation";
-import { createOutputPreviews, outputPreviewDownloadPath, type OutputResponse, type PreviewImage } from "./outputPreviews";
+import {
+  createGalleryPreviews,
+  createOutputPreviews,
+  outputOriginalDownloadPath,
+  outputPreviewDownloadPath,
+  type OutputResponse,
+  type PreviewImage,
+} from "./outputPreviews";
 import {
   authErrorMessage,
   restoreAuthFromRefresh,
   type AuthResponse,
   type RegistrationCodeResponse,
 } from "./authFlow";
+import { UpdateBadge } from "./update/UpdateBadge";
+import { UpdateModal } from "./update/UpdateModal";
+import { checkForAppUpdate, updateDownloadHref, type UpdateCheckResponse } from "./update/updateApi";
+import { hasUpdateNotice, readDismissedUpdateVersion, rememberDismissedUpdateVersion, shouldOpenUpdateModal } from "./update/updateState";
+import { APP_VERSION } from "./update/version";
 import "./App.css";
 
 const { Paragraph, Text, Title } = Typography;
@@ -192,6 +204,7 @@ const outputName: Record<string, string> = {
   detail: "商品详情图",
   scene: "商品细节实拍图",
 };
+const galleryPageLimit = 30;
 
 export function App() {
   usePointerGlow();
@@ -485,13 +498,6 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (auth: AuthResponse) 
               <Title level={2}>
                 {authMode === "login" ? "登录账号" : authMode === "register" ? "注册账号" : "找回密码"}
               </Title>
-              <Paragraph>
-                {authMode === "login"
-                  ? "一周内保持登录，重启软件会自动恢复；使用期间会顺延登录有效期。"
-                  : authMode === "register"
-                    ? "填写用户名、邮箱验证码和密码，验证通过后注册成功。"
-                    : "通过邮箱验证码重置密码，完成后请使用新密码登录。"}
-              </Paragraph>
             </div>
           </div>
 
@@ -596,7 +602,8 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
   const [galleryLoading, setGalleryLoading] = useState(false);
   const [galleryLoaded, setGalleryLoaded] = useState(false);
   const [galleryCursor, setGalleryCursor] = useState<string | null>(null);
-  const galleryPreviewsRef = useRef<PreviewImage[]>([]);
+  const [galleryPageCursors, setGalleryPageCursors] = useState<(string | null)[]>([null]);
+  const [galleryPageIndex, setGalleryPageIndex] = useState(0);
   const [account, setAccount] = useState<AccountResponse | null>(null);
   const [accountTransactions, setAccountTransactions] = useState<AccountTransaction[]>([]);
   const [accountLoading, setAccountLoading] = useState(false);
@@ -604,6 +611,11 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
   const [loading, setLoading] = useState(false);
   const [lastError, setLastError] = useState("");
   const [liveProgress, setLiveProgress] = useState(0);
+  const [appVersion, setAppVersion] = useState(APP_VERSION);
+  const [updateInfo, setUpdateInfo] = useState<UpdateCheckResponse | null>(null);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
+  const updateCheckedRef = useRef(false);
 
   const progress = useMemo(() => {
     return generationProgress({
@@ -626,16 +638,56 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
   }, [generation?.outputs.length, loading]);
 
   useEffect(() => {
+    let active = true;
+    window.zhifengUpdates
+      ?.getAppVersion()
+      .then((version) => {
+        if (active && version) {
+          setAppVersion(version);
+        }
+      })
+      .catch(() => {
+        // The browser dev server does not expose the Electron bridge.
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (updateCheckedRef.current || !appVersion) {
+      return;
+    }
+    updateCheckedRef.current = true;
+    let active = true;
+
+    async function checkForUpdates() {
+      try {
+        const update = await checkForAppUpdate({ currentVersion: appVersion });
+        if (!active) {
+          return;
+        }
+        setUpdateInfo(update);
+        const dismissedVersion = readDismissedUpdateVersion(window.localStorage);
+        if (shouldOpenUpdateModal(update, dismissedVersion)) {
+          setUpdateModalOpen(true);
+        }
+      } catch (error) {
+        if (!isNoReleaseAvailableError(error)) {
+          console.warn("Update check failed", error);
+        }
+      }
+    }
+
+    void checkForUpdates();
+    return () => {
+      active = false;
+    };
+  }, [appVersion]);
+
+  useEffect(() => {
     return () => previews.forEach((preview) => URL.revokeObjectURL(preview.url));
   }, [previews]);
-
-  useEffect(() => {
-    galleryPreviewsRef.current = galleryPreviews;
-  }, [galleryPreviews]);
-
-  useEffect(() => {
-    return () => galleryPreviewsRef.current.forEach((preview) => URL.revokeObjectURL(preview.url));
-  }, []);
 
   useEffect(() => {
     if (!productImagePreviewUrl) {
@@ -660,29 +712,15 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
     setProductImagePreviewUrl("");
   }
 
-  async function loadGallery(options: { append?: boolean } = {}) {
+  async function loadGalleryPage(cursor: string | null = null, pageIndex = 0) {
     setGalleryLoading(true);
     try {
-      const cursor = options.append ? galleryCursor : null;
-      if (options.append && !cursor) {
-        return;
-      }
-      const galleryOutputsPath = `/gallery/outputs?limit=30${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+      const galleryOutputsPath = `/gallery/outputs?limit=${galleryPageLimit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
       const galleryOutputs = await apiGet<ProjectOutputsResponse>(galleryOutputsPath, { token });
-      const previewImages = await createOutputPreviews(
-        galleryOutputs.items,
-        (output) => apiDownload(outputPreviewDownloadPath(output), { token }),
-        (blob) => URL.createObjectURL(blob),
-        { preserveOrder: true, ignoreDownloadErrors: true },
-      );
-      setGalleryPreviews((current) => {
-        if (options.append) {
-          return [...current, ...previewImages];
-        }
-        current.forEach((preview) => URL.revokeObjectURL(preview.url));
-        return previewImages;
-      });
+      const previewImages = createGalleryPreviews(galleryOutputs.items);
+      setGalleryPreviews(previewImages);
       setGalleryCursor(galleryOutputs.next_cursor ?? null);
+      setGalleryPageIndex(pageIndex);
       setGalleryLoaded(true);
     } catch (error) {
       message.error(generationErrorMessage(error));
@@ -696,21 +734,41 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
     if (galleryLoaded) {
       return;
     }
-    await loadGallery();
+    await loadGalleryPage(galleryPageCursors[galleryPageIndex] ?? null, galleryPageIndex);
+  }
+
+  async function loadNextGalleryPage() {
+    if (!galleryCursor) {
+      return;
+    }
+    const nextPageIndex = galleryPageIndex + 1;
+    setGalleryPageCursors((current) => {
+      const next = [...current];
+      next[nextPageIndex] = galleryCursor;
+      return next;
+    });
+    await loadGalleryPage(galleryCursor, nextPageIndex);
+  }
+
+  async function loadPreviousGalleryPage() {
+    if (galleryPageIndex <= 0) {
+      return;
+    }
+    const previousPageIndex = galleryPageIndex - 1;
+    await loadGalleryPage(galleryPageCursors[previousPageIndex] ?? null, previousPageIndex);
   }
 
   function resetGalleryCache() {
-    setGalleryPreviews((current) => {
-      current.forEach((preview) => URL.revokeObjectURL(preview.url));
-      return [];
-    });
+    setGalleryPreviews([]);
     setGalleryCursor(null);
+    setGalleryPageCursors([null]);
+    setGalleryPageIndex(0);
     setGalleryLoaded(false);
   }
 
   async function downloadOriginalOutput(output: OutputResponse) {
     try {
-      const blob = await apiDownload(`/outputs/${output.id}/download`, { token });
+      const blob = await apiDownload(outputOriginalDownloadPath(output), { token });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -743,6 +801,36 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
   async function openAccount() {
     setActiveWorkbenchPage("account");
     await loadAccount();
+  }
+
+  function dismissUpdatePrompt() {
+    if (updateInfo?.force_update) {
+      return;
+    }
+    if (updateInfo?.latest_version) {
+      rememberDismissedUpdateVersion(window.localStorage, updateInfo.latest_version);
+    }
+    setUpdateModalOpen(false);
+  }
+
+  async function installUpdate() {
+    if (!updateInfo) {
+      return;
+    }
+    setInstallingUpdate(true);
+    try {
+      if (window.zhifengUpdates?.install) {
+        await window.zhifengUpdates.install(updateInfo);
+        message.success("安装程序已启动");
+        return;
+      }
+      triggerBrowserDownload(updateDownloadHref(updateInfo.download_url), `zhifeng-image-${updateInfo.latest_version}.exe`);
+      message.info("安装包已开始下载，请下载完成后运行安装。");
+    } catch (error) {
+      message.error(`更新失败：${errorDisplayMessage(error)}`);
+    } finally {
+      setInstallingUpdate(false);
+    }
   }
 
   async function runFlow(values: ProductFormValues) {
@@ -905,6 +993,11 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
           </Button>
         </nav>
         <div className="topbar-user">
+          <UpdateBadge
+            version={appVersion}
+            hasNotice={hasUpdateNotice(updateInfo) && !updateModalOpen}
+            onClick={() => setUpdateModalOpen(true)}
+          />
           <Tag className="soft-tag">
             <UserRound size={13} />
             {userEmail}
@@ -914,6 +1007,14 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
           </Button>
         </div>
       </header>
+      <UpdateModal
+        open={updateModalOpen}
+        update={updateInfo}
+        appVersion={appVersion}
+        installing={installingUpdate}
+        onInstall={installUpdate}
+        onLater={dismissUpdatePrompt}
+      />
 
       {activeWorkbenchPage === "home" ? (
       <section className="workbench-grid">
@@ -1181,7 +1282,9 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
                 <Paragraph>展示当前账号已生成的商品图。</Paragraph>
               </div>
             </div>
-            <Tag className="soft-tag">{galleryPreviews.length} 张图片</Tag>
+            <Tag className="soft-tag">
+              第 {galleryPageIndex + 1} 页 · {galleryPreviews.length} 张图片
+            </Tag>
           </div>
           {galleryLoading && galleryPreviews.length === 0 ? (
             <Alert type="info" showIcon message="正在加载图库" description="正在读取当前账号下已经生成过的商品图。" />
@@ -1197,12 +1300,7 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
                       <strong>{outputName[item.output_type] ?? item.output_type}</strong>
                       <Tag color="green">{item.quality_status}</Tag>
                     </div>
-                    <Image
-                      src={item.url}
-                      alt={outputName[item.output_type] ?? item.output_type}
-                      className="output-image"
-                      style={{ width: "100%", maxHeight: 280, objectFit: "contain" }}
-                    />
+                    <GalleryPreviewImage item={item} token={token} />
                     <div className="output-card-bottom">
                       <Text type="secondary">
                         {item.width} x {item.height}
@@ -1215,10 +1313,13 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
                 </List.Item>
               )}
             />
-            {galleryCursor ? (
+            {galleryPageIndex > 0 || galleryCursor ? (
               <div className="gallery-load-more">
-                <Button loading={galleryLoading} onClick={() => void loadGallery({ append: true })}>
-                  鍔犺浇鏇村
+                <Button disabled={galleryPageIndex === 0 || galleryLoading} onClick={() => void loadPreviousGalleryPage()}>
+                  上一页
+                </Button>
+                <Button loading={galleryLoading} disabled={!galleryCursor} onClick={() => void loadNextGalleryPage()}>
+                  下一页
                 </Button>
               </div>
             ) : null}
@@ -1331,6 +1432,72 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
   );
 }
 
+function GalleryPreviewImage({ item, token }: { item: OutputResponse; token: string }) {
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl = "";
+    setPreviewUrl("");
+    setFailed(false);
+
+    apiDownload(outputPreviewDownloadPath(item), { token })
+      .then((blob) => {
+        const nextUrl = URL.createObjectURL(blob);
+        if (!active) {
+          URL.revokeObjectURL(nextUrl);
+          return;
+        }
+        objectUrl = nextUrl;
+        setPreviewUrl(nextUrl);
+      })
+      .catch(() => {
+        if (active) {
+          setFailed(true);
+        }
+      });
+
+    return () => {
+      active = false;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [item, token]);
+
+  if (failed) {
+    return (
+      <div
+        className="output-image"
+        style={{ alignItems: "center", display: "flex", justifyContent: "center", minHeight: 180, width: "100%" }}
+      >
+        缩略图加载失败
+      </div>
+    );
+  }
+
+  if (!previewUrl) {
+    return (
+      <div
+        className="output-image"
+        style={{ alignItems: "center", display: "flex", justifyContent: "center", minHeight: 180, width: "100%" }}
+      >
+        缩略图加载中
+      </div>
+    );
+  }
+
+  return (
+    <Image
+      src={previewUrl}
+      alt={outputName[item.output_type] ?? item.output_type}
+      className="output-image"
+      style={{ width: "100%", maxHeight: 280, objectFit: "contain" }}
+    />
+  );
+}
+
 async function uploadProductOriginal(file: File, productId: string, token: string): Promise<AssetResponse> {
   const presign = await apiPost<UploadPresignResponse>(
     "/uploads/presign",
@@ -1372,6 +1539,23 @@ async function waitForGenerationCompletion(
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function triggerBrowserDownload(href: string, filename: string): void {
+  const anchor = document.createElement("a");
+  anchor.href = href;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
+function isNoReleaseAvailableError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("NO_RELEASE_AVAILABLE");
+}
+
+function errorDisplayMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "未知错误";
 }
 
 function formatExpiry(value?: string): string {

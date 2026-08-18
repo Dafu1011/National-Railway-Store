@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { createOutputPreviews, outputPreviewDownloadPath, type OutputResponse } from "./outputPreviews";
+import {
+  createGalleryPreviews,
+  createOutputPreviews,
+  outputOriginalDownloadPath,
+  outputPreviewDownloadPath,
+  type OutputResponse,
+} from "./outputPreviews";
 
 describe("output previews", () => {
   it("downloads and sorts partial generation outputs in business order", async () => {
@@ -72,5 +78,47 @@ describe("output previews", () => {
     };
 
     expect(outputPreviewDownloadPath(output)).toBe("/outputs/thumb-output-id/thumbnail");
+  });
+
+  it("uses API-provided original download paths without duplicating the API prefix", () => {
+    const output: OutputResponse = {
+      id: "download-output-id",
+      output_type: "main",
+      width: 800,
+      height: 800,
+      quality_status: "passed",
+      download_url: "/api/v1/outputs/download-output-id/download",
+    };
+
+    expect(outputOriginalDownloadPath(output)).toBe("/outputs/download-output-id/download");
+  });
+
+  it("creates gallery previews from thumbnail urls without downloading blobs first", () => {
+    const outputs: OutputResponse[] = [
+      {
+        id: "latest-scene-id",
+        output_type: "scene",
+        width: 800,
+        height: 800,
+        quality_status: "passed",
+        thumbnail_url: "/api/v1/outputs/latest-scene-id/thumbnail",
+      },
+      {
+        id: "older-main-id",
+        output_type: "main",
+        width: 800,
+        height: 800,
+        quality_status: "passed",
+        download_url: "/api/v1/outputs/older-main-id/download",
+      },
+    ];
+
+    const previews = createGalleryPreviews(outputs);
+
+    expect(previews.map((preview) => preview.id)).toEqual(["latest-scene-id", "older-main-id"]);
+    expect(previews.map((preview) => preview.url)).toEqual([
+      "/api/v1/outputs/latest-scene-id/thumbnail",
+      "/api/v1/outputs/older-main-id/download",
+    ]);
   });
 });

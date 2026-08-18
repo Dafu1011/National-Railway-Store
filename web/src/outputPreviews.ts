@@ -32,6 +32,10 @@ export async function createOutputPreviews(
   return options.preserveOrder ? previewImages : sortOutputs(previewImages);
 }
 
+export function createGalleryPreviews(outputs: OutputResponse[]): PreviewImage[] {
+  return outputs.map((output) => ({ ...output, url: outputPreviewUrl(output) }));
+}
+
 export function sortOutputs(outputs: PreviewImage[]): PreviewImage[] {
   const order = ["main", "certificate", "package", "detail", "scene"];
   return [...outputs].sort((left, right) => outputRank(left.output_type, order) - outputRank(right.output_type, order));
@@ -39,6 +43,14 @@ export function sortOutputs(outputs: PreviewImage[]): PreviewImage[] {
 
 export function outputPreviewDownloadPath(output: OutputResponse): string {
   return normalizeApiPath(output.thumbnail_url || output.download_url || `/outputs/${output.id}/download`);
+}
+
+export function outputOriginalDownloadPath(output: OutputResponse): string {
+  return normalizeApiPath(output.download_url || `/outputs/${output.id}/download`);
+}
+
+function outputPreviewUrl(output: OutputResponse): string {
+  return output.thumbnail_url || output.download_url || `/api/v1/outputs/${output.id}/download`;
 }
 
 function outputRank(outputType: string, order: string[]): number {

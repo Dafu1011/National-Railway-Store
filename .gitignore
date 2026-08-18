@@ -15,12 +15,18 @@ vite.config.js
 vite.config.d.ts
 web/desktop-release/
 web/desktop-installer/
+web/desktop-installer-admin/
+web/desktop-installer-admin-clean/
 web/desktop-installer-current/
+web/desktop-installer-latest/
 web/desktop-installer-single/
 web/desktop-portable/
 web/desktop-latest/
 web/release/
 web/design-qa-artifacts/
+web/index-*.js
+web/main.cjs
+web/preload.cjs
 
 # Environment and local data
 .env

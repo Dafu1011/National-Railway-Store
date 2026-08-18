@@ -30,9 +30,14 @@ describe("layout chrome", () => {
     expect(appSource).toContain("galleryPreviews");
     expect(appSource).toContain("dataSource={galleryPreviews}");
     expect(appSource).toContain("if (galleryLoaded) {");
-    expect(appSource).toContain("outputPreviewDownloadPath(output)");
+    expect(appSource).toContain("createGalleryPreviews(galleryOutputs.items)");
+    expect(appSource).toContain("GalleryPreviewImage");
+    expect(appSource).toContain("loadPreviousGalleryPage");
+    expect(appSource).toContain("loadNextGalleryPage");
+    expect(appSource).toContain("上一页");
+    expect(appSource).toContain("下一页");
+    expect(appSource).not.toContain("鍔犺浇鏇村");
     expect(appSource).toContain("next_cursor");
-    expect(appSource).toContain("loadGallery({ append: true })");
   });
   it("adds an account page for balance and customer-service recharge", () => {
     expect(appSource).toContain('apiGet<AccountResponse>("/account/me"');

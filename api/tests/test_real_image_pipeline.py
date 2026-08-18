@@ -23,6 +23,48 @@ from app.providers.real_image import (
 
 
 class RealImagePipelinePromptTests(unittest.TestCase):
+
+    def test_package_prompt_renders_brand_value_as_large_standalone_text_without_brand_label(self):
+        product = {
+            "name": "????",
+            "brand": "??",
+            "model": "ZF-CPU",
+            "material": "???",
+        }
+        project = {"barcode_type": "EAN_13", "barcode_value": "6903244675147"}
+
+        prompt = _prompt_for("package", product, project)
+
+        self.assertIn("brand value only", prompt)
+        self.assertIn("large standalone brand wordmark", prompt)
+        self.assertIn("large standard printed Chinese brand text", prompt)
+        self.assertIn("character correctness and complete stroke structure are more important than sharpness", prompt)
+        self.assertIn("slight softness or mild ink blur is acceptable", prompt)
+        self.assertIn("not artistic typography", prompt)
+        self.assertIn("not calligraphy", prompt)
+        self.assertNotIn("?????", prompt)
+
+    def test_detail_module_prompts_put_large_brand_wordmark_only_in_first_section(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "????",
+                "brand": "??",
+                "model": "ZF-CPU",
+                "material": "???",
+            }
+        )
+
+        self.assertIn("large standard printed Chinese brand text", prompts[0])
+        self.assertIn("character correctness and complete stroke structure are more important than sharpness", prompts[0])
+        self.assertIn("slight softness or mild ink blur is acceptable", prompts[0])
+        self.assertIn("not artistic typography", prompts[0])
+        self.assertIn("not calligraphy", prompts[0])
+        self.assertNotIn("large artistic brand wordmark", prompts[0])
+        self.assertIn("brand: ??", prompts[0])
+        for prompt in prompts[1:]:
+            with self.subTest(prompt=prompt):
+                self.assertNotIn("brand: ??", prompt)
+                self.assertIn("Do not repeat the brand name", prompt)
     def test_non_detail_outputs_request_real_photography_not_rendered_art(self):
         product = {
             "name": "impact wrench",
@@ -789,14 +831,17 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         prompt = _prompt_for("package", product, project)
 
         self.assertIn("model must directly print the package text and barcode on the carton", prompt)
-        self.assertIn("brand: 智枫", prompt)
+        self.assertIn("Standalone carton brand wordmark text: 智枫", prompt)
+        self.assertIn("brand value only", prompt)
+        self.assertIn("large standalone brand wordmark", prompt)
+        self.assertNotIn("brand: 智枫", prompt)
         self.assertIn("product name: 智枫保温杯", prompt)
         self.assertIn("model: ZF-CUP-800", prompt)
         self.assertIn("manufacturer: 智枫科技", prompt)
         self.assertIn("address: 浙江省杭州市西湖区智枫路88号", prompt)
         self.assertIn("barcode type: EAN_13", prompt)
         self.assertIn("barcode digits: 4006381333931", prompt)
-        self.assertIn("品牌：智枫", prompt)
+        self.assertNotIn("品牌：智枫", prompt)
         self.assertIn("品名：智枫保温杯", prompt)
         self.assertIn("型号：ZF-CUP-800", prompt)
         self.assertIn("材质：不锈钢", prompt)
@@ -841,7 +886,8 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertNotIn("规格：", package_prompt)
         self.assertNotIn("材质：", package_prompt)
         self.assertNotIn("color:", package_prompt)
-        self.assertIn("品牌：智枫", package_prompt)
+        self.assertIn("Standalone carton brand wordmark text: 智枫", package_prompt)
+        self.assertNotIn("品牌：智枫", package_prompt)
         self.assertIn("品名：蓝牙鼠标", package_prompt)
         self.assertIn("型号：ZF-CPU", package_prompt)
 

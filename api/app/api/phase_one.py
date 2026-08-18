@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import base64
+import binascii
 from io import BytesIO
 from pathlib import Path
 import hashlib
@@ -890,10 +892,9 @@ async def list_gallery_outputs(
     storage: AppStorage = Depends(get_storage),
 ) -> dict[str, Any]:
     # Gallery history is account-scoped: every output row is filtered by the authenticated user's id.
-    offset = gallery_cursor_offset(cursor)
-    rows = list_outputs(storage, user_id=user["id"], passed_only=True, newest_first=True, limit=limit + 1, offset=offset)
+    rows = list_gallery_output_summaries(storage, user_id=user["id"], limit=limit + 1, cursor=cursor)
     items = rows[:limit]
-    next_cursor = str(offset + limit) if len(rows) > limit else None
+    next_cursor = encode_gallery_cursor(items[-1]) if len(rows) > limit and items else None
     return {"items": items, "next_cursor": next_cursor}
 
 
@@ -1630,6 +1631,43 @@ def get_job_payload(storage: AppStorage, job_id: str, user_id: str) -> dict[str,
     return payload
 
 
+def list_gallery_output_summaries(
+    storage: AppStorage,
+    *,
+    user_id: str,
+    limit: int,
+    cursor: str | None,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    clauses = ["user_id = ?", "quality_status = 'passed'"]
+    params: list[Any] = [user_id]
+    cursor_values = decode_gallery_cursor(cursor)
+    if cursor_values is not None:
+        clauses.append("(created_at < ? OR (created_at = ? AND id < ?))")
+        params.extend([cursor_values["created_at"], cursor_values["created_at"], cursor_values["id"]])
+    params.append(max(limit * 4, 20))
+    with storage.connect() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT id, output_type, width, height, quality_status, created_at, file_path
+            FROM generation_outputs
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    for row in rows:
+        payload = dict(row)
+        if not Path(payload["file_path"]).exists():
+            continue
+        payload.pop("file_path", None)
+        items.append(output_payload(payload))
+        if len(items) >= limit:
+            break
+    return items
+
+
 def list_outputs(
     storage: AppStorage,
     *,
@@ -1684,16 +1722,22 @@ def output_payload(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def gallery_cursor_offset(cursor: str | None) -> int:
+def encode_gallery_cursor(row: dict[str, Any]) -> str:
+    payload = json.dumps({"created_at": row["created_at"], "id": row["id"]}, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def decode_gallery_cursor(cursor: str | None) -> dict[str, str] | None:
     if cursor is None or cursor == "":
-        return 0
+        return None
     try:
-        offset = int(cursor)
-    except ValueError:
+        padded_cursor = cursor + "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded_cursor.encode("ascii")).decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, ValueError, json.JSONDecodeError):
         raise_error(status.HTTP_400_BAD_REQUEST, "INVALID_GALLERY_CURSOR", "Invalid gallery cursor.")
-    if offset < 0:
+    if not isinstance(payload, dict) or not isinstance(payload.get("created_at"), str) or not isinstance(payload.get("id"), str):
         raise_error(status.HTTP_400_BAD_REQUEST, "INVALID_GALLERY_CURSOR", "Invalid gallery cursor.")
-    return offset
+    return {"created_at": payload["created_at"], "id": payload["id"]}
 
 
 def ensure_output_thumbnail(path: Path) -> Path:
@@ -1785,6 +1829,7 @@ def insert_generation_output(
         (job_id, user_id, output_type),
     ).fetchone()
     if existing is not None:
+        ensure_output_thumbnail(file_path)
         return
     connection.execute(
         """
@@ -1805,6 +1850,7 @@ def insert_generation_output(
             source_asset_version_id,
         ),
     )
+    ensure_output_thumbnail(file_path)
 
 
 def get_owned_row(storage: AppStorage, table: str, row_id: str, user_id: str) -> dict[str, Any] | None:

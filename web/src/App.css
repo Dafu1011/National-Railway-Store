@@ -633,6 +633,98 @@ button:focus-visible,
   white-space: nowrap;
 }
 
+.version-badge {
+  position: relative;
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border: 1px solid rgba(35, 36, 39, 0.08);
+  border-radius: 999px;
+  color: var(--color-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1;
+  background: rgba(255, 255, 255, 0.74);
+  box-shadow: 0 8px 18px -14px rgba(35, 36, 39, 0.28);
+}
+
+.version-badge:disabled {
+  cursor: default;
+}
+
+.version-badge-notice {
+  padding-right: 18px;
+}
+
+.version-badge-notice:not(:disabled):hover {
+  border-color: rgba(38, 132, 255, 0.28);
+  color: #1f5fbf;
+  background: rgba(239, 247, 255, 0.95);
+  box-shadow: 0 10px 22px -14px rgba(38, 132, 255, 0.38);
+}
+
+.version-badge-dot {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  border-radius: 999px;
+  background: #2684ff;
+  box-shadow: 0 0 0 3px rgba(38, 132, 255, 0.12);
+}
+
+.update-modal-body {
+  display: grid;
+  gap: 16px;
+}
+
+.update-version-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.update-version-row > div {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid rgba(35, 36, 39, 0.08);
+  border-radius: 16px;
+  background: rgba(247, 248, 248, 0.86);
+}
+
+.update-version-row strong {
+  color: var(--color-ink);
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.update-notes {
+  display: grid;
+  gap: 8px;
+}
+
+.update-notes ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--color-heading);
+}
+
+.update-notes li {
+  line-height: 1.6;
+}
+
+.update-notes .ant-typography {
+  margin: 0;
+}
+
 .workbench-grid {
   position: relative;
   z-index: 1;

@@ -6,8 +6,8 @@ const { test } = require("node:test");
 
 const { buildProxyTarget, normalizeApiBaseUrl, resolveApiBaseUrl } = require("./main.cjs");
 
-test("normalizeApiBaseUrl defaults to the local FastAPI backend", () => {
-  assert.equal(normalizeApiBaseUrl(), "http://127.0.0.1:8000");
+test("normalizeApiBaseUrl defaults to the configured production API backend", () => {
+  assert.equal(normalizeApiBaseUrl(), "http://124.174.70.182:8088");
 });
 
 test("normalizeApiBaseUrl removes trailing slashes and ignores paths", () => {
@@ -73,6 +73,32 @@ test("renderer server does not serve sibling files through encoded traversal", a
   } finally {
     await server.close();
     fs.rmSync(fixture.rootDir, { recursive: true, force: true });
+  }
+});
+
+test("buildUpdateDownloadUrl keeps installer downloads on the configured API origin", () => {
+  const { buildUpdateDownloadUrl } = require("./main.cjs");
+
+  assert.equal(
+    buildUpdateDownloadUrl("/api/v1/updates/releases/release-2-0-10/download", "http://api.local:8088"),
+    "http://api.local:8088/api/v1/updates/releases/release-2-0-10/download",
+  );
+  assert.throws(
+    () => buildUpdateDownloadUrl("https://example.com/release.exe", "http://api.local:8088"),
+    /must stay on the configured API origin/,
+  );
+});
+
+test("sha256File calculates the installer checksum used before launching updates", async () => {
+  const { sha256File } = require("./main.cjs");
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "zhifeng-update-"));
+  const installerPath = path.join(rootDir, "installer.exe");
+  fs.writeFileSync(installerPath, "fake installer bytes");
+
+  try {
+    assert.equal(sha256File(installerPath), "fef6689acd9011dc45034ad2bc7570f06536086f220cd9aacbfba73170814cc9");
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
   }
 });
 
