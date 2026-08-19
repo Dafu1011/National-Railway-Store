@@ -21,6 +21,12 @@ describe("generation error UX", () => {
     expect(message).toContain("稍后重试");
   });
 
+  it("surfaces frontend generation polling timeouts as network retry guidance", () => {
+    const message = generationErrorMessage(new Error("GENERATION_TIMEOUT: Generation did not finish in time."));
+
+    expect(message).toBe("网络不佳，请检查网络后重试。");
+  });
+
   it("shows output file errors in readable Chinese even when the backend message is mojibake", () => {
     const message = generationErrorMessage(new Error("OUTPUT_FILE_NOT_FOUND: 杈撳嚭鏂囦欢涓嶅瓨鍦ㄣ€?"));
 

@@ -5,7 +5,7 @@ const http = require("node:http");
 const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
-const { Readable } = require("node:stream");
+const { Readable, Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 
 const DEFAULT_API_BASE_URL = "http://124.174.70.182:8088";
@@ -308,8 +308,11 @@ function isSafeExternalUrl(rawUrl) {
 
 function registerUpdateIpc({ app, ipcMain }) {
   ipcMain.handle("updates:get-app-version", () => app.getVersion());
-  ipcMain.handle("updates:install", async (_event, update) => {
-    const installerPath = await downloadUpdateInstaller(update, { appModule: app });
+  ipcMain.handle("updates:install", async (event, update) => {
+    const installerPath = await downloadUpdateInstaller(update, {
+      appModule: app,
+      onProgress: (progress) => event.sender.send("updates:download-progress", progress),
+    });
     launchInstaller(installerPath);
     app.quit();
     return { installer_path: installerPath, launched: true };
@@ -337,6 +340,7 @@ async function downloadUpdateInstaller(
     apiBaseUrl = process.env.ZHIFENG_API_BASE_URL,
     appModule,
     fetchImpl = globalThis.fetch,
+    onProgress,
   } = {},
 ) {
   const payload = normalizeUpdatePayload(update);
@@ -352,9 +356,11 @@ async function downloadUpdateInstaller(
   const updatesDir = resolveUpdatesDirectory(appModule);
   fs.mkdirSync(updatesDir, { recursive: true });
   const installerPath = path.join(updatesDir, installerFileName(payload));
+  const contentLength = Number(response.headers && typeof response.headers.get === "function" ? response.headers.get("content-length") : 0);
+  const totalBytes = payload.file_size_bytes > 0 ? payload.file_size_bytes : contentLength;
 
   try {
-    await writeResponseBodyToFile(response, installerPath);
+    await writeResponseBodyToFile(response, installerPath, { totalBytes, onProgress });
     assertDownloadedFileSize(installerPath, payload.file_size_bytes);
     assertDownloadedFileSha256(installerPath, payload.sha256);
     return installerPath;
@@ -392,15 +398,40 @@ function resolveUpdatesDirectory(appModule) {
   return path.join(os.tmpdir(), "zhifeng-image-updates");
 }
 
-async function writeResponseBodyToFile(response, filePath) {
+async function writeResponseBodyToFile(response, filePath, { totalBytes = 0, onProgress } = {}) {
+  emitDownloadProgress(onProgress, 0, totalBytes);
   if (!response.body) {
     const buffer = Buffer.from(await response.arrayBuffer());
     fs.writeFileSync(filePath, buffer);
+    emitDownloadProgress(onProgress, buffer.length, totalBytes || buffer.length);
     return;
   }
 
   const readable = typeof response.body.pipe === "function" ? response.body : Readable.fromWeb(response.body);
-  await pipeline(readable, fs.createWriteStream(filePath));
+  let receivedBytes = 0;
+  const progressStream = new Transform({
+    transform(chunk, _encoding, callback) {
+      receivedBytes += chunk.length;
+      emitDownloadProgress(onProgress, receivedBytes, totalBytes);
+      callback(null, chunk);
+    },
+  });
+  await pipeline(readable, progressStream, fs.createWriteStream(filePath));
+  emitDownloadProgress(onProgress, receivedBytes, totalBytes || receivedBytes);
+}
+
+function emitDownloadProgress(onProgress, receivedBytes, totalBytes) {
+  if (typeof onProgress !== "function") {
+    return;
+  }
+  const safeReceived = Math.max(0, Number(receivedBytes) || 0);
+  const safeTotal = Math.max(0, Number(totalBytes) || 0);
+  const percent = safeTotal > 0 ? Math.min(100, Math.round((safeReceived / safeTotal) * 100)) : safeReceived > 0 ? 100 : 0;
+  onProgress({
+    percent,
+    received_bytes: safeReceived,
+    total_bytes: safeTotal,
+  });
 }
 
 function assertDownloadedFileSize(filePath, expectedSize) {

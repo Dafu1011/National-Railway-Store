@@ -14,6 +14,10 @@ export function generationErrorMessage(error: unknown): string {
     return "资源不存在或当前账号无权访问。";
   }
 
+  if (raw.includes("GENERATION_TIMEOUT")) {
+    return "网络不佳，请检查网络后重试。";
+  }
+
   if (raw.includes("IMAGE_PROVIDER_FAILED")) {
     if (raw.includes("KELE_TIMEOUT")) {
       return "可乐请求超时：上游生图耗时过长，请稍后重试。";

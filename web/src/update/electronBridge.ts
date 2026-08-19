@@ -10,9 +10,16 @@ export type UpdateInstallResult = {
   launched: boolean;
 };
 
+export type UpdateDownloadProgress = {
+  percent: number;
+  received_bytes: number;
+  total_bytes: number;
+};
+
 export type ZhifengUpdateBridge = {
   getAppVersion: () => Promise<string>;
   install: (update: UpdateInstallRequest) => Promise<UpdateInstallResult>;
+  onDownloadProgress?: (callback: (progress: UpdateDownloadProgress) => void) => () => void;
 };
 
 declare global {

@@ -15,6 +15,10 @@ export type UpdateCheckResponse = {
   published_at: string;
 };
 
+type RawUpdateCheckResponse = Omit<UpdateCheckResponse, "release_notes"> & {
+  release_notes?: unknown;
+};
+
 export type UpdateCheckRequest = {
   currentVersion: string;
   platform?: "windows";
@@ -35,7 +39,7 @@ export async function checkForAppUpdate({
     channel,
   });
 
-  return apiGet<UpdateCheckResponse>(`/updates/check?${params.toString()}`);
+  return normalizeUpdateCheckResponse(await apiGet<RawUpdateCheckResponse>(`/updates/check?${params.toString()}`));
 }
 
 export function updateDownloadHref(downloadUrl: string): string {
@@ -44,4 +48,29 @@ export function updateDownloadHref(downloadUrl: string): string {
     return trimmed;
   }
   return `/${trimmed}`;
+}
+
+function normalizeUpdateCheckResponse(payload: RawUpdateCheckResponse): UpdateCheckResponse {
+  return {
+    ...payload,
+    release_notes: normalizeReleaseNotes(payload.release_notes),
+  };
+}
+
+function normalizeReleaseNotes(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map(normalizeReleaseNote).filter((note): note is string => Boolean(note));
+}
+
+function normalizeReleaseNote(value: unknown): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (value && typeof value === "object" && "text" in value) {
+    const text = (value as { text?: unknown }).text;
+    return typeof text === "string" ? text.trim() : "";
+  }
+  return "";
 }

@@ -48,4 +48,26 @@ describe("layout chrome", () => {
     expect(css).toContain(".recharge-card");
     expect(existsSync(resolve(__dirname, "../public/wechat-service-qr.jpg"))).toBe(true);
   });
+
+  it("waits longer for generation and does not mark frontend polling timeouts as failed jobs", () => {
+    expect(appSource).toContain("20 * 60 * 1000");
+    expect(appSource).toContain("const generationTimedOut = isGenerationTimeoutError(error);");
+    expect(appSource).toContain("if (!generationTimedOut && activeProject)");
+    expect(appSource).not.toContain("const deadline = Date.now() + 10 * 60 * 1000;");
+  });
+
+  it("shows update installer download progress in the update modal", () => {
+    const updateModalSource = readFileSync(resolve(__dirname, "update/UpdateModal.tsx"), "utf8");
+    const bridgeSource = readFileSync(resolve(__dirname, "update/electronBridge.ts"), "utf8");
+    const preloadSource = readFileSync(resolve(__dirname, "../electron/preload.cjs"), "utf8");
+
+    expect(updateModalSource).toContain("downloadProgress");
+    expect(updateModalSource).toContain("<Progress");
+    expect(updateModalSource).toContain("正在下载安装包");
+    expect(css).toContain(".update-download-progress");
+    expect(appSource).toContain("setUpdateDownloadProgress");
+    expect(appSource).toContain("onDownloadProgress");
+    expect(bridgeSource).toContain("onDownloadProgress");
+    expect(preloadSource).toContain("updates:download-progress");
+  });
 });

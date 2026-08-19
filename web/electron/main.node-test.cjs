@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { Readable } = require("node:stream");
 const { test } = require("node:test");
 
 const { buildProxyTarget, normalizeApiBaseUrl, resolveApiBaseUrl } = require("./main.cjs");
@@ -101,6 +102,47 @@ test("sha256File calculates the installer checksum used before launching updates
     fs.rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test("downloadUpdateInstaller reports installer download progress", async () => {
+  const { downloadUpdateInstaller, sha256File } = require("./main.cjs");
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "zhifeng-update-progress-"));
+  const installerBytes = Buffer.from("fake installer bytes with progress");
+  const progressEvents = [];
+
+  try {
+    const installerPath = await downloadUpdateInstaller(
+      {
+        download_url: "/api/v1/updates/releases/release-2-0-12/download",
+        latest_version: "2.0.12",
+        platform: "windows",
+        arch: "x64",
+        file_size_bytes: installerBytes.length,
+        sha256: "",
+      },
+      {
+        apiBaseUrl: "http://api.local:8088",
+        appModule: { getPath: () => rootDir },
+        fetchImpl: async () => ({
+          ok: true,
+          body: Readable.from([installerBytes.subarray(0, 8), installerBytes.subarray(8)]),
+        }),
+        onProgress: (progress) => progressEvents.push(progress),
+      },
+    );
+
+    assert.equal(fs.existsSync(installerPath), true);
+    assert.equal(sha256File(installerPath), cryptoHash(installerBytes));
+    assert.equal(progressEvents.at(-1).percent, 100);
+    assert.equal(progressEvents.at(-1).received_bytes, installerBytes.length);
+    assert.equal(progressEvents.at(-1).total_bytes, installerBytes.length);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+function cryptoHash(buffer) {
+  return require("node:crypto").createHash("sha256").update(buffer).digest("hex");
+}
 
 function createRendererFixture() {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "zhifeng-renderer-"));

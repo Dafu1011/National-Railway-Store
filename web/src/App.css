@@ -725,6 +725,16 @@ button:focus-visible,
   margin: 0;
 }
 
+.update-download-progress {
+  display: grid;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.update-download-progress .ant-progress {
+  margin: 0;
+}
+
 .workbench-grid {
   position: relative;
   z-index: 1;

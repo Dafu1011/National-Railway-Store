@@ -40,6 +40,35 @@ describe("checkForAppUpdate", () => {
     expect(update.latest_version).toBe("2.0.10");
     expect(update.release_notes).toEqual(["修复更新检测"]);
   });
+
+  it("normalizes object-shaped release notes before the update modal renders them", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({
+            has_update: true,
+            current_version: "0.1.0",
+            latest_version: "2.0.11",
+            channel: "stable",
+            platform: "windows",
+            arch: "x64",
+            force_update: true,
+            release_notes: [{ type: "fixed", text: "优化字体以及修复已知漏洞。" }],
+            download_url: "/api/v1/updates/releases/release-2-0-11/download",
+            sha256: "abc123",
+            file_size_bytes: 128,
+            published_at: "2026-08-18T00:00:00",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+
+    const update = await checkForAppUpdate({ currentVersion: "0.1.0" });
+
+    expect(update.release_notes).toEqual(["优化字体以及修复已知漏洞。"]);
+  });
 });
 
 describe("updateDownloadHref", () => {

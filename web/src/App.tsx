@@ -47,6 +47,7 @@ import { apiDownload, apiGet, apiPost, apiPutRaw } from "./api/client";
 import { barcodeValidationMessage, suggestedBarcodeValue, type BarcodeValidationResponse } from "./barcodeValidation";
 import { generationProgress, nextLiveGenerationProgress } from "./generationProgress";
 import { buildProjectCreatePayload } from "./generationPayload";
+import { accountDisplayName, transactionDetailText } from "./accountDisplay";
 import { buildProductCreatePayload, type ProductPayloadValues } from "./productPayload";
 import { generationErrorMessage } from "./generationErrors";
 import { pageForAuthState } from "./navigation";
@@ -210,6 +211,7 @@ export function App() {
   usePointerGlow();
   const [token, setToken] = useState("");
   const [userEmail, setUserEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [authChecking, setAuthChecking] = useState(true);
 
   useEffect(() => {
@@ -221,6 +223,7 @@ export function App() {
       if (auth) {
         setToken(auth.access_token);
         setUserEmail(auth.user.email);
+        setUsername(auth.user.username || "");
       }
       setAuthChecking(false);
     });
@@ -241,6 +244,7 @@ export function App() {
       }
       setToken(auth.access_token);
       setUserEmail(auth.user.email);
+      setUsername(auth.user.username || "");
     }
     const intervalId = window.setInterval(refreshSession, 6 * 60 * 60 * 1000);
     const refreshOnFocus = () => {
@@ -264,11 +268,13 @@ export function App() {
   function handleAuthenticated(auth: AuthResponse) {
     setToken(auth.access_token);
     setUserEmail(auth.user.email);
+    setUsername(auth.user.username || "");
   }
 
   function logout() {
     setToken("");
     setUserEmail("");
+    setUsername("");
   }
 
   if (authChecking) {
@@ -282,7 +288,7 @@ export function App() {
         path="/generate"
         element={
           <ProtectedRoute token={token}>
-            <GeneratePage token={token} userEmail={userEmail} onLogout={logout} />
+            <GeneratePage token={token} username={username} userEmail={userEmail} onLogout={logout} />
           </ProtectedRoute>
         }
       />
@@ -587,7 +593,17 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (auth: AuthResponse) 
   );
 }
 
-function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail: string; onLogout: () => void }) {
+function GeneratePage({
+  token,
+  username,
+  userEmail,
+  onLogout,
+}: {
+  token: string;
+  username: string;
+  userEmail: string;
+  onLogout: () => void;
+}) {
   const { message } = AntdApp.useApp();
   const [form] = Form.useForm<ProductFormValues>();
   const [activeWorkbenchPage, setActiveWorkbenchPage] = useState<"home" | "gallery" | "account">("home");
@@ -615,6 +631,7 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResponse | null>(null);
   const [updateModalOpen, setUpdateModalOpen] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [updateDownloadProgress, setUpdateDownloadProgress] = useState<number | null>(null);
   const updateCheckedRef = useRef(false);
 
   const progress = useMemo(() => {
@@ -818,6 +835,10 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
       return;
     }
     setInstallingUpdate(true);
+    setUpdateDownloadProgress(0);
+    const unsubscribeProgress = window.zhifengUpdates?.onDownloadProgress?.((progress) => {
+      setUpdateDownloadProgress(progress.percent);
+    });
     try {
       if (window.zhifengUpdates?.install) {
         await window.zhifengUpdates.install(updateInfo);
@@ -825,11 +846,14 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
         return;
       }
       triggerBrowserDownload(updateDownloadHref(updateInfo.download_url), `zhifeng-image-${updateInfo.latest_version}.exe`);
+      setUpdateDownloadProgress(100);
       message.info("安装包已开始下载，请下载完成后运行安装。");
     } catch (error) {
       message.error(`更新失败：${errorDisplayMessage(error)}`);
     } finally {
+      unsubscribeProgress?.();
       setInstallingUpdate(false);
+      setUpdateDownloadProgress(null);
     }
   }
 
@@ -918,10 +942,13 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
       message.success("五图已生成，可预览和下载");
     } catch (error) {
       const displayMessage = generationErrorMessage(error);
+      const generationTimedOut = isGenerationTimeoutError(error);
       setLastError(displayMessage);
       let recoveredCount = 0;
-      if (activeProject) {
+      if (!generationTimedOut && activeProject) {
         setProject({ ...activeProject, status: "failed" });
+      }
+      if (activeProject) {
         try {
           const partialOutputs = await apiGet<ProjectOutputsResponse>(`/projects/${activeProject.id}/outputs`, { token });
           if (partialOutputs.items.length > 0) {
@@ -932,7 +959,7 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
             );
             setGeneration({
               id: "",
-              status: "failed",
+              status: generationTimedOut ? "running" : "failed",
               provider_name: "partial",
               outputs: partialOutputs.items,
             });
@@ -944,10 +971,10 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
           // Preserve the original generation error if partial preview recovery also fails.
         }
       }
-      if (recoveredCount === 0) {
+      if (recoveredCount === 0 && !generationTimedOut) {
         setLiveProgress(0);
       }
-      if (recoveredCount > 0) {
+      if (recoveredCount > 0 || generationTimedOut) {
         message.warning(`${displayMessage}；已保留 ${recoveredCount} 张阶段性输出。`);
       } else {
         message.error(displayMessage);
@@ -1000,7 +1027,7 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
           />
           <Tag className="soft-tag">
             <UserRound size={13} />
-            {userEmail}
+            {accountDisplayName(account, username, userEmail)}
           </Tag>
           <Button onClick={onLogout} icon={<LogOut size={16} />}>
             退出
@@ -1012,6 +1039,7 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
         update={updateInfo}
         appVersion={appVersion}
         installing={installingUpdate}
+        downloadProgress={updateDownloadProgress}
         onInstall={installUpdate}
         onLater={dismissUpdatePrompt}
       />
@@ -1405,7 +1433,7 @@ function GeneratePage({ token, userEmail, onLogout }: { token: string; userEmail
                     <div className="transaction-row">
                       <div>
                         <strong>{transactionName(item.type)}</strong>
-                        <span>{item.remark || item.created_at}</span>
+                        <span>{transactionDetailText(item)}</span>
                       </div>
                       <Text className={item.points < 0 ? "points-minus" : "points-plus"}>
                         {item.points > 0 ? "+" : ""}
@@ -1522,7 +1550,7 @@ async function waitForGenerationCompletion(
   token: string,
   onProgress: (job: GenerationResponse) => void,
 ): Promise<GenerationResponse> {
-  const deadline = Date.now() + 10 * 60 * 1000;
+  const deadline = Date.now() + 20 * 60 * 1000;
   while (Date.now() < deadline) {
     await delay(1200);
     const job = await apiGet<GenerationResponse>(`/generation-jobs/${jobId}`, { token });
@@ -1535,6 +1563,10 @@ async function waitForGenerationCompletion(
     }
   }
   throw new Error("GENERATION_TIMEOUT: Generation did not finish in time.");
+}
+
+function isGenerationTimeoutError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("GENERATION_TIMEOUT");
 }
 
 function delay(ms: number): Promise<void> {

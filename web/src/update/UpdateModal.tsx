@@ -1,4 +1,4 @@
-import { Alert, Button, Modal, Typography } from "antd";
+import { Alert, Button, Modal, Progress, Typography } from "antd";
 import { Clock3, Download } from "lucide-react";
 import type { UpdateCheckResponse } from "./updateApi";
 
@@ -9,21 +9,23 @@ type UpdateModalProps = {
   update: UpdateCheckResponse | null;
   appVersion: string;
   installing: boolean;
+  downloadProgress: number | null;
   onInstall: () => void;
   onLater: () => void;
 };
 
-export function UpdateModal({ open, update, appVersion, installing, onInstall, onLater }: UpdateModalProps) {
+export function UpdateModal({ open, update, appVersion, installing, downloadProgress, onInstall, onLater }: UpdateModalProps) {
   const forceUpdate = Boolean(update?.force_update);
+  const progressPercent = Math.max(0, Math.min(100, Math.round(downloadProgress ?? 0)));
 
   return (
     <Modal
       open={open && Boolean(update?.has_update)}
       title="发现新版本"
       centered
-      closable={!forceUpdate}
-      maskClosable={!forceUpdate}
-      onCancel={forceUpdate ? undefined : onLater}
+      closable={!forceUpdate && !installing}
+      maskClosable={!forceUpdate && !installing}
+      onCancel={forceUpdate || installing ? undefined : onLater}
       footer={[
         forceUpdate ? null : (
           <Button key="later" icon={<Clock3 size={16} />} onClick={onLater} disabled={installing}>
@@ -60,6 +62,12 @@ export function UpdateModal({ open, update, appVersion, installing, onInstall, o
               <Paragraph>暂无更新说明。</Paragraph>
             )}
           </div>
+          {installing ? (
+            <div className="update-download-progress">
+              <Text type="secondary">正在下载安装包</Text>
+              <Progress percent={progressPercent} status={progressPercent >= 100 ? "success" : "active"} />
+            </div>
+          ) : null}
         </div>
       ) : null}
     </Modal>
