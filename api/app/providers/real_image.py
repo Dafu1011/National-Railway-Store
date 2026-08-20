@@ -48,10 +48,12 @@ class KeleFiveImagePipeline:
         product: dict[str, Any],
         project: dict[str, Any],
         source_image_path: Path,
+        reference_image_paths: dict[str, Path] | None = None,
     ) -> list[GeneratedImage]:
         job_dir = output_dir / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
         generated: list[GeneratedImage] = []
+        reference_image_paths = reference_image_paths or {}
 
         for output_type, width, height in OUTPUT_SPECS:
             if output_type == "detail":
@@ -69,10 +71,21 @@ class KeleFiveImagePipeline:
                 generated.append(GeneratedImage(output_type=output_type, width=image.width, height=image.height, path=path))
                 continue
 
+            image_paths = [source_image_path]
+            if output_type in {"certificate", "package"} and reference_image_paths.get(output_type):
+                image_paths.append(reference_image_paths[output_type])
             raw = self.provider.edit_image(
-                prompt=_prompt_for(output_type, product, project),
+                prompt=_prompt_for(
+                    output_type,
+                    product,
+                    {
+                        **project,
+                        "has_certificate_reference": output_type == "certificate" and len(image_paths) > 1,
+                        "has_package_reference": output_type == "package" and len(image_paths) > 1,
+                    },
+                ),
                 size=self.edit_size,
-                image_paths=[source_image_path],
+                image_paths=image_paths,
             )
             image = _open_provider_image(raw)
             image = _normalize_size(image, width, height, background="white" if output_type in {"main", "certificate", "package"} else "#f3f4f6")
@@ -98,48 +111,81 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
     package_rows = _package_information_rows(product, package_manufacturer, package_address)
     package_brand = _clean_text(product.get("brand", ""))
     package_brand_wordmark = (
-        "Package brand rendering rule: render the brand value only as a large standalone brand wordmark on the carton front; "
+        "Package brand rendering rule: render the brand value only as a large standalone brand wordmark on the package front; "
         "brand value only, never render the field label Brand, brand, 品牌, or 品牌： before it. "
         "Render it as large standard printed Chinese brand text, plain regular-weight Songti/Heiti-style characters, not artistic typography, not calligraphy, not brush style, not decorative typography, not a stylized logo redesign. "
         "The standalone brand wordmark must be much larger than the ordinary information rows and occupy more pixels. character correctness and complete stroke structure are more important than sharpness; slight softness or mild ink blur is acceptable. "
         "Do not squeeze, merge, simplify, substitute, pseudo-render, split, connect, warp, or decorate any brand character. Preserve every radical, stroke order impression, inner gap, and complete Chinese stroke structure as faithfully as possible. "
-        f"Standalone carton brand wordmark text: {package_brand}. "
+        f"Standalone package brand wordmark text: {package_brand}. "
         if package_brand
-        else "No standalone carton brand wordmark is needed because the user did not enter a brand. "
+        else "No standalone package brand wordmark is needed because the user did not enter a brand. "
     )
     package_fact_rows = [
         ("product name", product.get("name", "")),
-        ("model", product.get("model", "")),
-        ("material", product.get("material", "")),
+        ("specification model", product.get("model", "")),
         ("manufacturer", package_manufacturer),
         ("address", package_address),
         ("barcode type", project.get("barcode_type", "")),
         ("barcode digits", project.get("barcode_value", "")),
     ]
     package_text_layout = (
-        "Candidate package front text layout, printed directly by the image model as native ink on the carton, "
+        "Candidate package side information area, printed directly by the image model as native ink on the visible package side panel only, "
         "using only non-empty user-entered ordinary information rows in this Chinese label order, excluding the brand row because the brand is rendered separately as the large wordmark: "
         f"{_format_chinese_rows(package_rows)} "
     )
     package_facts = (
-        f"Candidate package information to print directly on the carton, from non-empty user-entered fields only: "
+        f"Candidate package information to print directly on the package surface, from non-empty user-entered fields only: "
         f"{_format_fact_rows(package_fact_rows)} "
     )
+    certificate_manufacturer = certificate_config.get("manufacturer_name") or _company_name(product, certificate_config)
+    certificate_address = certificate_config.get("manufacturer_address") or certificate_config.get("address") or package_address
     certificate_facts = (
         "Candidate certificate information to print directly on the certificate card, from user-entered fields where available: "
         f"brand: {product.get('brand', '')}; "
         f"product name: {product.get('name', '')}; "
         f"model/specification: {product.get('model', '')}; "
-        f"capacity/specification: {_spec_text(product)}; "
         f"production date: {certificate_config.get('production_date', '')}; "
-        f"inspector: {certificate_config.get('inspector', '')}; "
-        f"company: {_company_name(product, certificate_config)}; "
+        f"manufacturer: {certificate_manufacturer}; "
+        f"factory address: {certificate_address}; "
         f"barcode type: {project.get('barcode_type', '')}; "
         f"barcode digits: {project.get('barcode_value', '')}. "
+    )
+    certificate_reference_instruction = (
+        "A certificate reference image is provided as an additional reference image. Use the certificate reference only for certificate card style, border style, card material, field layout rhythm, and inspection-stamp style; do not copy its old product data, old barcode digits, old date, old inspector value, camera composition, or product pose. "
+        if project.get("has_certificate_reference")
+        else "No certificate reference image is provided; generate a simple realistic certificate style based on the product and user-entered certificate fields. "
+    )
+    has_package_reference = bool(project.get("has_package_reference"))
+    package_reference_instruction = (
+        "A package reference image is provided as an additional reference image. The package reference image is the highest-priority packaging-style reference. The current uploaded product and user-entered specification are higher priority than copying the reference package literally. Use the package reference only for packaging style: box type, form factor, handle or carry strap, color palette, graphic density, panel decoration, material finish, flap or lid construction, surface texture, and print-layout rhythm; do not copy its old product data, old barcode digits, old brand, old size, background, camera composition, or product pose. Keep the generated scene on the required pure white background even if the package reference image has a colored environment. Adapt the referenced package style to the current product category, product volume, product count, storage needs, and realistic retail packaging logic. If the reference package belongs to a different product category, borrow only its broad visual language and construction cues, then adjust package proportions, handle/carry structure, panel graphics, and decoration intensity so the final package looks designed for the current product itself; do not copy a packaging proportion, carry structure, visual motif, or premium/cartoon/fresh-food style that would make the final package look mismatched to the current product. "
+        if has_package_reference
+        else "No package reference image is provided; design a product-appropriate retail package based on the uploaded product structure and user-entered specification model. Choose the package box shape, material feel, color system, and graphic style from the product's real category and retail packing logic. Do not default to a generic brown package, tall narrow bottle box, high box, or plain shipping box unless that is the realistic package for this product. "
+    )
+    package_style_instruction = (
+        "Follow the uploaded package reference for the package's visual style only. If the reference package has a colored printed surface, product illustration, logo zone, decorative panels, carry handle, glossy finish, matte printed finish, folded gift-box structure, or angled retail-box form, the generated package should visibly inherit those style traits while adapting them to the current product's realistic retail package shape, size, category, and specification, and while replacing all written product information with the current user's fields. "
+        if has_package_reference
+        else "Use a normal product-appropriate retail package style with realistic structure, lid or flap seams, subtle material texture, and proportions that fit the uploaded product. Make it designed retail packaging, not an oversized shipping package, not an appliance package, and not a decorative poster. "
+    )
+    package_front_geometry_instruction = (
+        "Keep the package side information area and barcode readable on the visible package side panel. If the package reference uses an angled box perspective, preserve a similar natural retail-product perspective while keeping the side information area upright on its side panel and avoiding unreadable distortion. Do not force the package into a square-on brown-box layout when a reference package is provided. "
+        if has_package_reference
+        else "The package side panel must be clearly visible and stable enough for readable package printing. Keep the side information zone reasonably visible to the camera, with level side-panel text baselines and no excessive convergence, twisted panels, or unreadable perspective. "
+    )
+    package_side_instruction = (
+        "Visible package side faces should follow the reference package's side style. If the reference has colored side panels, decorative graphics, side logos, pattern blocks, QR/barcode zones, or illustration continuation, keep that kind of side-panel design style while replacing old readable data with current user fields. "
+        if has_package_reference
+        else "The visible package side face should stay visually simple and consistent with the generated retail package style, with no random unrelated side icons, side logos, warning marks, or duplicate barcode blocks. "
+    )
+    package_barcode_position_instruction = (
+        "The barcode must be directly below the side information area on the same visible package side panel, following normal retail package layout logic. The barcode and all information rows must remain fully visible, uncropped, unobstructed, and inside the same side panel. The package barcode must not be centered high, placed near the brand wordmark, placed on the front display area, or floating outside the package; it must sit on a real visible package side surface with enough quiet space around it. "
+        if has_package_reference
+        else "The barcode must be directly below the side information area on the same visible package side panel, following normal retail package layout logic. The barcode and all information rows must remain fully visible, uncropped, unobstructed, and inside the same side panel. The package barcode must not be centered high, placed near the brand wordmark, placed on the front display area, or floating outside the package; it must sit on a real visible package side surface with enough quiet space around it. "
     )
     reference_base = (
         "Use the uploaded product photo as the exact product reference. "
         "The uploaded product photo may be an angled, side, top-down, or non-front view; preserve the real visible product appearance from that view, including visible side geometry, foreshortening, label perspective, seam direction, cap/lid ellipse, logo position, and any occluded or partially visible surfaces. Do not force the product into a generic front-facing, perfectly symmetrical, or redesigned catalog view. When a new scene camera angle is required, re-project the same real product structure into that camera angle while keeping the uploaded-view identity and perspective clues consistent. "
+        "All five generated image types must depict the same single uploaded product and preserve the same product style identity across marketplace main photo, certificate co-photo, package co-photo, detail page, and scene photo. Do not switch to a different SKU, package variant, colorway, flavor, label design, logo layout, cap shape, bottle shape, accessory set, or material finish between image types. "
+        "User-entered product information is the source of truth for all readable product facts. For generated readable labels, package printing, certificate rows, and detail-page fact text, do not preserve or copy conflicting readable product facts from the uploaded product photo or package reference. If the visual source contains old or conflicting text, keep only the product appearance or package style and replace readable facts with the current user-entered information. "
         "Keep the product structure, color, material, proportions, wear, and surface texture consistent. "
         "Identify and keep only the actual sellable product body from the uploaded photo. Exclude display stands, support poles, bases, hooks, hangers, risers, background props, and any non-product objects even if they touch or hold the product in the source image. For headphones or earphones, the product body means only the headband, earcups, hinges, cushions, cable, controls, and other headphone parts; never include a mannequin head, stand, rack, pole, or base as part of the product. "
         "preserve existing physical markings: the exact visible logo, brand lettering, small badges, and surface markings from the uploaded product when visible, but do not invent new readable text. "
@@ -182,11 +228,13 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
             "For the uploaded product, choose a natural catalog-safe orientation for its real category after removing any non-product support hardware. Headphones should appear as the headphones alone, with the headband and earcups naturally arranged on the tabletop or in a stable product-only display pose; no black stand, pole, base, rack, mannequin, hook, or hanger may appear. Do not make the product lean unnaturally, tip, float, hover, or balance impossibly. Give it only a very subtle natural rotational angle if needed so the placement feels like a casual real phone snapshot rather than a perfectly staged catalog pose. "
             "The product must physically contact the support surface with a believable contact point: no floating, no tipping, no impossible balance, no intersection, and no detached cutout appearance. Preserve real material details, mild natural highlights, realistic black surface reflections, and one consistent reflection and lighting direction. "
             "Directly generate both the product and the certificate in one natural photo, directly generate both the product and the certificate in one natural photo; do not reserve an empty area for backend compositing, do not create a cutout, do not paste a later card, and do not make the certificate look like a separate overlay layer. The certificate must be generated by the image model as part of the same camera shot, with the same lens perspective, same white tabletop plane, same lighting direction, and same natural photo texture as the product. "
+            + certificate_reference_instruction
             + certificate_facts
+            + "Required certificate rows: 品牌, 名称, 规格型号, 生产日期, 生产厂家, 厂址, 检验员 as QC stamp only, and a barcode centered horizontally. Do not render category, material, color, detail copy, company-name-only rows, inspection-result text, or any unentered/old reference-image facts. "
             + "On the certificate, print only user-entered fields that match the visible uploaded product. If a user-entered value conflicts with the visible product category, structure, or appearance, omit that row rather than printing incorrect product information. Do not write capacity, volume, material, model, product name, brand, or specification values that belong to another product type; do not invent replacement values. "
             + "Place the certificate in the same current lower-left area and keep the current reference-like lower-left placement. The certificate should have a lower-left to upper-right diagonal relationship with the product and should sit reasonably close to the product base without touching it. Its visual center should stay around 31% to 35% of image width and 62% to 66% of image height; visual center should be around 31% to 35% of image width and 62% to 66% of image height. "
             "The certificate is a single small horizontal rectangular white hard card or slightly thick paper card, laid flat on the same horizontal tabletop plane as the product. It is not tissue, not folded paper, not stacked sheets, not a standing card, not a portrait sheet, and not a floating overlay; not tissue, not folded, not stacked, not diamond-patterned. The card may have only extremely slight natural paper waviness while retaining clean sharply cut edges and corners; may show only very slight natural paper waviness or tiny surface wrinkles. Its card edges must have no frayed, furry, torn, ragged, or fuzzy edges. Its long edge should remain nearly horizontal with only a slight 3 to 5 degree rotation and share exactly the same tabletop perspective as the product, not a perfectly front-facing rectangle; long edge nearly horizontal with only a slight 3 to 5 degree rotation; not a vertical standing card, not a portrait paper sheet, not a floating overlay. "
-            f"The certificate face must be clear and readable. It should show a clean normal product inspection certificate layout with the title 产品合格证 or 合格证, only the compatible user-entered information rows, one red circular quality inspection stamp replacing any separate inspection-result text, and one small barcode using the entered barcode digits. Do not print 检验结果：合格, 结果：合格, or a standalone 合格 result row as plain text. The red quality inspection stamp should look like a real inked QC stamp: a thin red circle, one horizontal divider line, upper text 检验, and lower text exactly matching the inspector parameter value: {_clean_text(certificate_config.get('inspector') or 'QC-01')}. For the certificate barcode, render a realistic EAN-style retail barcode: the first digit printed outside the barcode bars on the left, the remaining digits printed below the bars in two groups, and a clear center guard before the eighth digit. The start guard, center guard before the eighth digit, and end guard bars must be the longest. Use thin and thick vertical bars with varied bar heights, clean white gaps, realistic quiet zones, and no decorative simplification. barcode numerals must exactly match the entered barcode digits, keep the digits separated and readable below the bars, use regular-weight numerals only, and avoid any scrambled, merged, missing, repeated, invented, or substituted digits; no malformed barcode numerals, no random barcode digits, no pseudo barcode numbers, no distorted barcode numbers, and no barcode-number gibberish. The certificate printing must be black or dark gray ink with a simple blue border if needed; no red triangle stamp, no QR code, no extra marks except the single red quality inspection stamp, no garbled characters, no pseudo text, no random English replacement words, no duplicate text blocks, and no invented unrelated fields. "
+            f"The certificate face must be clear and readable. It should show a clean normal product inspection certificate layout with the title 产品合格证 or 合格证, only the compatible user-entered information rows, one red circular quality inspection stamp replacing any separate inspection-result text, and one small barcode using the entered barcode digits. Do not print 检验结果：合格, 结果：合格, or a standalone 合格 result row as plain text. Do not print the inspector parameter value as ordinary black text; do not show a normal 检验员：QC-01 row, and do not place QC-01 after a 检验员 label as typed table text. The red quality inspection stamp should look like a real inked QC stamp: a thin red circle or oval stamp mark with no fixed stamp wording. Do not render any fixed stamp text such as 检验, 合格, PASS, QC, or inspection result inside the stamp. The stamp may contain only the user-entered inspector value exactly as provided: {_clean_text(certificate_config.get('inspector') or 'QC-01')}. Make the red quality inspection stamp half the previous visual size while keeping the inspector value recognizable; the inspector value may be slightly blurred but must not become garbled, substituted, pseudo text, or random characters. The stamp must be placed exactly where the inspector value would normally appear, as if the red stamp is stamped over the inspector parameter value position; it may cover nearby certificate text or field labels when needed, but it must never cover or touch the barcode, barcode quiet zone, or barcode numerals. For the certificate barcode, render a realistic EAN-style retail barcode centered horizontally on the certificate: the first digit printed outside the barcode bars on the left, the remaining digits printed below the bars in two groups, and a clear center guard before the eighth digit. The start guard, center guard before the eighth digit, and end guard bars must be the longest. Use thin and thick vertical bars with varied bar heights, clean white gaps, realistic quiet zones, and no decorative simplification. barcode numerals must exactly match the entered barcode digits, keep the digits separated and readable below the bars, use regular-weight numerals only, and avoid any scrambled, merged, missing, repeated, invented, or substituted digits; no malformed barcode numerals, no random barcode digits, no pseudo barcode numbers, no distorted barcode numbers, and no barcode-number gibberish. The certificate printing must be black or dark gray ink with a simple blue border if needed; no red triangle stamp, no QR code, no extra marks except the single red quality inspection stamp, no garbled characters, no pseudo text, no random English replacement words, no duplicate text blocks, and no invented unrelated fields. "
             "Keep a clear lower-left to upper-right diagonal relationship between the certificate and the product. The certificate and product must have a clear white gap, must leave a clear white gap from the product and never slide underneath or cover the product, must never touch or overlap, and the certificate must never slide underneath or cover any portion of the product; do not overlap. Keep both subject areas away from the exact image center. The visual mass should remain mainly in the upper and middle-upper part of the frame while the lower half remains mostly clean pure white negative space. "
             "Use only the referenced product's sellable body on the pure white plane: no props, no desk accessories, no plants, no laptop, no books, no pens, no hands, no packaging box, no extra bottle, no decorative objects, no display stand, no support pole, no base, and no unrelated objects. "
             "Use a high front-left angled top-down phone viewpoint: camera above and slightly in front-left of the horizontal tabletop plane, lens angled downward about 50 to 55 degrees. This is not a full top-down flat-lay and not a straight front view. Use an equivalent 28 to 35 mm phone wide-angle smartphone lens with mild natural near-large/far-small perspective, but no obvious wide-angle stretching, barrel distortion, edge deformation, or exaggerated perspective. "
@@ -200,27 +248,29 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
             + real_photo
             + clean_product_surface
             + catalog_exposure_control
-            + "Create a pure white background plain carton base photo with an appropriately sized kraft retail carton on the left and the uploaded product placed near the carton on the right-side tabletop when physically possible. The product may occupy more horizontal space, sit lower in the frame, appear as a flatter top or side view, or be less visually prominent if that is required by its natural resting pose. Use the uploaded product image as the only visual reference for the product's real outer shape, appearance, visible parts, proportions, material, color, surface texture, markings, and structural relationships; do not copy any pose that depends on a stand, hook, rack, hanger, pole, base, mannequin, or other display support. Output must be exactly 800x800 pixels, 1:1 square, 800x800, 1:1 square. "
-            "The scene must use a clean seamless pure #ffffff white background and a pure white matte tabletop surface. The background and tabletop should visually merge naturally with no visible horizon line, no wall, no table edge, no floor, no colored background, no environmental objects, and no clutter. "
-            "Packaging shape and size must adapt to the uploaded product's visible real structure, outer dimensions, folded or storage volume, and realistic retail packing logic. Do not default to a tall narrow bottle carton, high box, or vertical box shape. For headphones or earphones, use a medium-small headphone retail box that is wider and shallower than a bottle carton, sized to fit folded or nested earcups and headband; never use a thermos-style carton or oversized shipping box for headphones. "
-            "Use a normal retail carton style: a simple store-ready upright kraft carton with a top tuck flap or clean lid seam, subtle bottom seam, realistic cardboard fiber texture, subtle real used-photo imperfections, and proportions that fit the uploaded product. Make it designed retail packaging, not a plain generic shipping carton, not an oversized shipping carton, not an appliance carton, and not a decorative poster or gift box. "
-            "The carton must be structurally complete and fully visible in the final frame. Do not crop, truncate, erase, melt, overexpose, or hide the carton top, bottom, top flaps, lid seam, front corners, side corners, lower edge, or any outer packaging boundary. The complete packaging silhouette must remain visible and physically plausible. "
-            "Place the appropriately sized carton on the left and the product resting area nearby with natural retail-photo spacing. Physical realism has absolute priority over product visibility, product attractiveness, front-facing display, and showing product features. Do not rotate, stand, lean, prop up, or balance the product just to show more of the product. It is acceptable if the product looks lower, flatter, less prominent, less complete, less front-facing, partially less informative, or visually less impressive, as long as it rests naturally according to physics. The carton may stand upright and face the camera for readable front printing. This carton-facing rule applies only to the carton, never to the product. The product must not copy the carton's upright front-facing orientation. For product placement only, preserve the uploaded product's identity, appearance, visible parts, materials, proportions, and structural relationships, not its original supported display position, camera viewpoint, or canvas orientation. First remove every non-product object from the source reference, including stands, poles, bases, hooks, hangers, racks, mannequins, and invisible support; then choose the product pose from its real-world normal use orientation, normal resting orientation, designed functional contact surface, actual stable contact points, and center of gravity. A product may stand upright only when it is explicitly designed to stand unsupported in normal use or normal retail display and has a clear stable base or designed standing foot. A broad surface alone is not permission to stand the product upright. For desktop-use products, handheld devices, controllers, remotes, mice, keyboards, chargers, power banks, small electronics, tools, and any product with a designed bottom or underside, place the product in its real tabletop resting pose. The designed bottom, underside, feet, pads, base, or normal contact surface must be on the tabletop. The product top should face upward relative to the tabletop, not forward toward the camera. The top/use side may be visible only through a natural camera angle, not by rotating the product upright toward the camera. Do not rotate the product onto its front, tail, side, edge, cable, connector, rounded end, or decorative face just to satisfy a vertical composition. If the normal resting/use pose is horizontal, low, flat, side-lying, or slightly diagonal, keep that pose. The product may occupy more horizontal tabletop area when that is the physically natural resting pose; do not compress, crop, or stand the product to fit a narrow right-side silhouette. Forbidden: standing a normally flat tabletop product vertically on its tail, front, side, edge, curved end, cable, connector, or any narrow contact point. Forbidden: showing a normally flat tabletop product as an upright front-facing object beside the carton. Forbidden: using a small contact shadow to fake physical contact while the product is actually vertical. For products that need an external stand, hook, rack, hanger, pole, base, or mannequin to remain upright, unsupported vertical placement is forbidden after those supports are removed. Hard rule for headphones and earphones: when no visible stand or support fixture is included, vertical or upright placement is forbidden. The entire headphones must lie flat, side-lying, or low diagonal on the tabletop; the headband, both earcups, cable, inline control, and microphone must all rest on or visibly contact the tabletop. Do not support headphones only on one earcup edge or a narrow earcup rim, and do not let the headband rise as a free-standing arch. Do not let headphones balance upright on one edge, float, hover, lean without support, stand on a cable, or hang in the air. They may sit visually close but must not intersect. For this package co-photo, realistic consistent contact shadows directly beneath all tabletop contact points are required so the product and carton feel photographed together rather than composited separately. "
-            "The carton front face must be clearly visible and front face nearly parallel to the camera. The front print zone must be almost square-on to the camera, flat and stable enough for direct model-rendered package printing. carton front must be straight-on enough that model-generated native printing does not look tilted. avoid perspective that makes upright package text look crooked. Keep the front-face vertical side edges straight and nearly vertical, and keep horizontal package baselines level. Avoid strong perspective, slanted front faces, twisted cartons, diagonal front panels, trapezoid print zones, excessive convergence, or a carton that appears to rotate away from the viewer. "
-            "The visible carton side face may show only natural kraft cardboard and structural folds. It must be a plain unmarked side face with no side icons, side logos, side badges, side symbols, or side markings, no decorative side graphics, no unrelated warning marks, and no random printed elements. "
-            "The carton front must have no front rectangular frame, no bordered front panel, no printed box outline, and no unnecessary graphic border. model must directly print the package text and barcode on the carton as native ink on kraft cardboard, not as a floating sticker, not as an overlay, and not as a separate label. "
+            + "Create a pure white background product-and-package co-photo with an appropriately sized retail package on the left and the uploaded product placed near the package on the right-side tabletop when physically possible. The product may occupy more horizontal space, sit lower in the frame, appear as a flatter top or side view, or be less visually prominent if that is required by its natural resting pose. Use the uploaded product image as the only visual reference for the product's real outer shape, appearance, visible parts, proportions, material, color, surface texture, markings, and structural relationships; do not copy any pose that depends on a stand, hook, rack, hanger, pole, base, mannequin, or other display support. Output must be exactly 800x800 pixels, 1:1 square, 800x800, 1:1 square. "
+            + package_reference_instruction
+            + "The scene must keep a clean seamless pure #ffffff white background and a pure white matte tabletop surface. The background and tabletop should visually merge naturally with no visible horizon line, no wall, no table edge, no floor, no colored background, no environmental objects, and no clutter. "
+            "Package size must be chosen from the real product volume and the user-entered 规格型号/model value. Packaging shape and size must adapt to the uploaded product's visible real structure, outer dimensions, folded or storage volume, specification model, and realistic retail packing logic. Do not default to a tall narrow bottle package, high box, or vertical box shape. For headphones or earphones, use a medium-small headphone retail box that is wider and shallower than a bottle package, sized to fit folded or nested earcups and headband; never use a thermos-style package or oversized shipping box for headphones. "
+            + package_style_instruction
+            + "The package must be structurally complete and fully visible in the final frame. Do not crop, truncate, erase, melt, overexpose, or hide the package top, bottom, top flaps, lid seam, handle, front corners, side corners, lower edge, or any outer packaging boundary when that structure exists. The complete packaging silhouette must remain visible and physically plausible. "
+            "Place the appropriately sized package on the left and the product resting area nearby with natural retail-photo spacing. Physical realism has absolute priority over product visibility, product attractiveness, front-facing display, and showing product features. Do not rotate, stand, lean, prop up, or balance the product just to show more of the product. It is acceptable if the product looks lower, flatter, less prominent, less complete, less front-facing, partially less informative, or visually less impressive, as long as it rests naturally according to physics. The package may stand upright or sit at the natural package angle required by its referenced or product-appropriate structure. This package orientation rule applies only to the package, never to the product. The product must not copy the package's upright front-facing orientation. For product placement only, preserve the uploaded product's identity, appearance, visible parts, materials, proportions, and structural relationships, not its original supported display position, camera viewpoint, or canvas orientation. First remove every non-product object from the source reference, including stands, poles, bases, hooks, hangers, racks, mannequins, and invisible support; then choose the product pose from its real-world normal use orientation, normal resting orientation, designed functional contact surface, actual stable contact points, and center of gravity. A product may stand upright only when it is explicitly designed to stand unsupported in normal use or normal retail display and has a clear stable base or designed standing foot. A broad surface alone is not permission to stand the product upright. For desktop-use products, handheld devices, controllers, remotes, mice, keyboards, chargers, power banks, small electronics, tools, and any product with a designed bottom or underside, place the product in its real tabletop resting pose. The designed bottom, underside, feet, pads, base, or normal contact surface must be on the tabletop. The product top should face upward relative to the tabletop, not forward toward the camera. The top/use side may be visible only through a natural camera angle, not by rotating the product upright toward the camera. Do not rotate the product onto its front, tail, side, edge, cable, connector, rounded end, or decorative face just to satisfy a vertical composition. If the normal resting/use pose is horizontal, low, flat, side-lying, or slightly diagonal, keep that pose. The product may occupy more horizontal tabletop area when that is the physically natural resting pose; do not compress, crop, or stand the product to fit a narrow right-side silhouette. Forbidden: standing a normally flat tabletop product vertically on its tail, front, side, edge, curved end, cable, connector, or any narrow contact point. Forbidden: showing a normally flat tabletop product as an upright front-facing object beside the package. Forbidden: using a small contact shadow to fake physical contact while the product is actually vertical. For products that need an external stand, hook, rack, hanger, pole, base, or mannequin to remain upright, unsupported vertical placement is forbidden after those supports are removed. Hard rule for headphones and earphones: when no visible stand or support fixture is included, vertical or upright placement is forbidden. The entire headphones must lie flat, side-lying, or low diagonal on the tabletop; the headband, both earcups, cable, inline control, and microphone must all rest on or visibly contact the tabletop. Do not support headphones only on one earcup edge or a narrow earcup rim, and do not let the headband rise as a free-standing arch. Do not let headphones balance upright on one edge, float, hover, lean without support, stand on a cable, or hang in the air. They may sit visually close but must not intersect. For this package co-photo, realistic consistent contact shadows directly beneath all tabletop contact points are required so the product and package feel photographed together rather than composited separately. "
+            + package_front_geometry_instruction
+            + package_side_instruction
+            + "The package front must have no unnecessary artificial printed border unless that border style comes from the package reference. The ordinary package information area must be on the visible package side panel only. Do not create a front information area; the package front may carry the large brand wordmark, product image, product illustration, or decorative visual design, but ordinary information rows and barcode must stay on the side panel. The model must directly print the package text and barcode on the package surface as native ink or printed packaging graphics, not as a floating sticker, not as an overlay, and not as a separate label. "
             + package_brand_wordmark
             + package_facts
             + package_text_layout
-            + "On the package, print only user-entered fields that match the visible uploaded product. If a user-entered value conflicts with the visible product category, structure, or appearance, omit that row rather than printing incorrect product information. Do not show capacity, volume, material, product name, model, brand, or specification values that belong to another product type; do not invent replacement values. Render only the selected compatible Chinese and Latin characters from the package information. no garbled characters, no pseudo text, no random English replacement words, no hallucinated brand, no duplicate text blocks, no unrelated product facts, and no invented labels. Keep all package text upright, level, evenly spaced, and aligned like normal package printing. The text must read upright relative to the carton front; it should share the carton front's vertical axis and horizontal baseline, with no diagonal drift and no perspective mismatch. "
-            "The barcode must be drawn directly on the carton front from the barcode type and barcode digits above, like a real EAN retail barcode. The first digit outside the barcode bars on the left, then the remaining digits sit below the bars in two groups with a center guard before the right group; start guard two bars, center guard two bars before the eighth digit, and end guard two bars are the longest. The bars must vary naturally in width and height like a real EAN retail barcode, with thin and thick vertical bars, clean white gaps, realistic quiet zones, and no decorative simplification. barcode digits must be clear, regular weight, and not bold; not bold, not blurry, not thickened, not smeared, and not fused into the vertical code bars. Use one barcode block only, with readable digits below the bars, sized realistically for the carton. "
+            + "On the package, print user-entered fields as the authoritative product facts. Do not show capacity, volume, material, product name, model, brand, or specification values that were not entered by the user or that come from another product, another package reference, or old source-image text; do not invent replacement values. Render only the selected compatible Chinese and Latin characters from the package information. no garbled characters, no pseudo text, no random English replacement words, no hallucinated brand, no duplicate text blocks, no unrelated product facts, and no invented labels. Keep all package text upright, level, evenly spaced, and aligned like normal package printing. The text must read upright relative to the visible package panel; it should share the package panel's vertical axis and horizontal baseline, with no diagonal drift and no perspective mismatch. "
+            + package_barcode_position_instruction
+            + "The barcode must be drawn directly on the visible package surface from the barcode type and barcode digits above, like a real EAN retail barcode. The first digit outside the barcode bars on the left, then the remaining digits sit below the bars in two groups with a center guard before the right group; start guard two bars, center guard two bars before the eighth digit, and end guard two bars are the longest. The bars must vary naturally in width and height like a real EAN retail barcode, with thin and thick vertical bars, clean white gaps, realistic quiet zones, and no decorative simplification. barcode digits must be clear, regular weight, and not bold; not bold, not blurry, not thickened, not smeared, and not fused into the vertical code bars. Use one barcode block only, with readable digits below the bars, sized realistically for the package. "
             "Do not add handling marks, up arrows, moisture marks, random extra labels, unrelated code graphics, unrelated QR codes, warning triangles, stickers, badges, unrelated certification symbols, or duplicate barcode blocks; avoid unrelated warning symbols. "
             "Preserve the uploaded product's visible product type, main structure, proportions, seams, surface finish, material texture, edges, visible logo, and recognizable appearance after excluding non-product support hardware. Do not redesign, recolor, deform, squeeze, stretch, taper, swell, or replace the product. Do not preserve the uploaded source image's exact 2D silhouette, source camera angle, source canvas orientation, or supported display posture. Re-project the product into its physically natural tabletop pose even if this makes the product look flatter, lower, foreshortened, side-facing, or less complete than the source reference. For cylindrical products, preserve the cylindrical form accurately with straight body sides and properly aligned top and bottom ellipses; for headphones, preserve the headband arc, earcup shapes, hinge geometry, cushions, and left-right relationship without adding the source display stand. "
             "Keep product edges smooth, continuous, anti-aliased, and photographic in the final natural resting pose. No jagged stair-step edges, no pixelated contour, no fuzzy AI mask, no white fringe, no broken outline, no melted edge, and no cutout halo. "
-            "The carton must remain fully inside the image with comfortable white breathing room around its complete packaging silhouette. Avoid unnecessary product cropping, but product physical resting pose is more important than showing every product outline or feature. Do not rotate the product upright just to keep the product outline complete. 商品包装必须完整，包装顶部、底部、四角、折边、封口线和箱体轮廓都必须完整可见. "
-            "Use soft natural light from the left and upper-left with restrained realistic highlights and mild clean contact shadows. Lighting direction must remain consistent across the carton, the product, and tabletop. Avoid harsh studio lighting and avoid conflicting highlight directions. "
-            "Critical exposure requirement: prevent overexposure on the top of the product and the top of the packaging. 商品顶部严禁过度曝光，包装顶部也严禁过曝. Preserve visible tonal detail, lid contour, rim, edge transitions, cardboard fibers, and top flap geometry. No part of the black product top may become a blown-out white or pale gray patch. "
-            "The final feeling must be a realistic retail product photograph: clean, believable, restrained, with complete packaging geometry, accurate product structure, a clean plain carton base photo, controlled highlights, and no overexposure on the product or carton top. Avoid CGI rendering, exaggerated advertising gloss, distorted packaging, crooked typography, warped retail codes, bold retail-code numerals, incomplete packaging, floating print layers, and blown-out highlights."
+            "The package must remain fully inside the image with comfortable white breathing room around its complete packaging silhouette. Avoid unnecessary product cropping, but product physical resting pose is more important than showing every product outline or feature. Do not rotate the product upright just to keep the product outline complete. 商品包装必须完整，包装顶部、底部、四角、折边、封口线和箱体轮廓都必须完整可见. "
+            "Use soft natural light from the left and upper-left with restrained realistic highlights and mild clean contact shadows. Lighting direction must remain consistent across the package, the product, and tabletop. Avoid harsh studio lighting and avoid conflicting highlight directions. "
+            "Critical exposure requirement: prevent overexposure on the top of the product and the top of the packaging. 商品顶部严禁过度曝光，包装顶部也严禁过曝. Preserve visible tonal detail, lid contour, rim, edge transitions, package material texture, and top flap geometry. No part of the black product top may become a blown-out white or pale gray patch. "
+            "The final feeling must be a realistic retail product photograph: clean, believable, restrained, with complete packaging geometry, accurate product structure, a clean product-and-package co-photo, controlled highlights, and no overexposure on the product or package top. Avoid CGI rendering, exaggerated advertising gloss, distorted packaging, crooked typography, warped retail codes, bold retail-code numerals, incomplete packaging, floating print layers, and blown-out highlights."
         ),
         "detail": (
             reference_base
@@ -248,9 +298,8 @@ def _package_information_rows(
 ) -> list[tuple[str, str]]:
     return [
         ("品名", _clean_text(product.get("name", ""))),
-        ("型号", _clean_text(product.get("model", ""))),
-        ("材质", _clean_text(product.get("material", ""))),
-        ("厂商", _clean_text(manufacturer_name)),
+        ("规格型号", _clean_text(product.get("model", ""))),
+        ("生产厂家", _clean_text(manufacturer_name)),
         ("地址", _clean_text(manufacturer_address)),
     ]
 
@@ -271,15 +320,14 @@ def _detail_module_prompts(product: dict[str, Any]) -> list[str]:
     fact_text = _format_fact_rows(
         [
             ("product", name),
-            ("model", product.get("model", "")),
-            ("material", product.get("material", "")),
-            ("color", product.get("color", "")),
+            ("specification model", product.get("model", "")),
         ]
     )
     base = (
         "Use the uploaded product photo as the exact product reference. "
         "The uploaded product photo may not be a front view; preserve the real visible product appearance from the uploaded view, including actual perspective, visible side surfaces, foreshortening, label angle, seam direction, logo placement, cap/lid ellipse, and any naturally hidden surfaces. Do not force a generic front-facing or perfectly symmetrical product view when the uploaded product is angled, side-facing, top-down, or partially turned. "
         "Match the marketplace main image product style exactly: keep the same product identity, outer appearance, color, material, scale, silhouette, visible parts, seams, finish, exact same visible product logo, and every visible marking consistent across all detail sections. "
+        "The detail page modules must match the same product style identity used by the main photo, certificate co-photo, package co-photo, and scene photo. Do not switch to a different SKU, package variant, colorway, flavor, label design, logo layout, cap shape, bottle shape, accessory set, or material finish inside any detail module. "
         "All rendered product appearances must come from the same single uploaded product reference. "
         "For every close-up, bottom view, top view, side view, macro crop, inset, and full-product view, the product must share the same structure, geometry, proportions, material, texture, color, seams, edges, bevels, labels, logo position, and visible markings as the main product image. "
         "Do not invent a different bottom, underside, lid, cap, base, anti-slip pad, connector, label, badge, logo placement, surface pattern, display stand, support pole, base, hanger, rack, mannequin, or non-product support hardware in any module. "
@@ -445,13 +493,15 @@ def _build_detail_page(sources: list[Image.Image], product: dict[str, Any], proj
 
 def _certificate_rows(product: dict[str, Any], project: dict[str, Any]) -> list[tuple[str, str]]:
     config = project.get("certificate_config", {}) if isinstance(project.get("certificate_config", {}), dict) else {}
+    manufacturer_name = config.get("manufacturer_name") or _company_name(product, config)
+    manufacturer_address = config.get("manufacturer_address") or config.get("address") or ""
     return [
         ("品牌", _clip(product.get("brand", ""), 16)),
-        ("产品名称", _clip(product.get("name", ""), 18)),
+        ("名称", _clip(product.get("name", ""), 18)),
         ("规格型号", _clip(_spec_model_text(product), 20)),
         ("生产日期", _clip(config.get("production_date") or _date_text(project.get("created_at")), 16)),
-        ("检验员", _clip(config.get("inspector") or "QC-01", 16)),
-        ("公司名称", _clip(_company_name(product, config), 18)),
+        ("生产厂家", _clip(manufacturer_name, 18)),
+        ("厂址", _clip(manufacturer_address, 24)),
     ]
 
 
@@ -460,23 +510,38 @@ def _compose_certificate(image: Image.Image, product: dict[str, Any], project: d
     draw = ImageDraw.Draw(card)
     draw.rectangle((7, 7, 353, 183), outline=(37, 99, 172, 255), width=3)
     title = _font(24, font_path)
-    body = _font(10, font_path)
+    body = _font(9, font_path)
+    stamp_font = _font(11, font_path)
+    stamp_value_font = _font(10, font_path)
     draw.text((68, 20), "合 格 证", fill=(31, 41, 55, 255), font=title)
     draw.line((34, 58, 202, 58), fill=(37, 99, 172, 255), width=2)
-    y = 70
+    y = 64
     for label, value in _certificate_rows(product, project):
         draw.text((24, y), f"{label}: {value}", fill=(31, 41, 55, 255), font=body)
-        y += 17
+        y += 14
+    config = project.get("certificate_config", {}) if isinstance(project.get("certificate_config", {}), dict) else {}
+    draw.text((205, 103), "检验员:", fill=(31, 41, 55, 255), font=body)
+    _draw_qc_stamp(card, (252, 91), _clip(config.get("inspector") or "QC-01", 10), stamp_font, stamp_value_font)
     barcode = render_barcode_image(
         BarcodeType(project["barcode_type"]),
         project["barcode_value"],
-        width=136,
+        width=150,
         height=44,
         draw_border=False,
     ).convert("RGBA")
-    card.alpha_composite(barcode, (196, 112))
+    card.alpha_composite(barcode, ((card.width - barcode.width) // 2, 137))
     tabletop_card = _flatten_certificate_for_tabletop(card)
     _paste_tabletop_paper(image, tabletop_card, (95, 410))
+
+
+def _draw_qc_stamp(card: Image.Image, xy: tuple[int, int], inspector: str, stamp_font: ImageFont.ImageFont, value_font: ImageFont.ImageFont) -> None:
+    draw = ImageDraw.Draw(card)
+    x, y = xy
+    red = (198, 45, 45, 220)
+    draw.ellipse((x, y, x + 50, y + 34), outline=red, width=2)
+    draw.line((x + 5, y + 17, x + 45, y + 17), fill=red, width=1)
+    draw.text((x + 14, y + 4), "检验", fill=red, font=stamp_font)
+    draw.text((x + 9, y + 18), inspector, fill=red, font=value_font)
 
 
 def _flatten_certificate_for_tabletop(card: Image.Image) -> Image.Image:
@@ -543,11 +608,9 @@ def _compose_package_label(image: Image.Image, product: dict[str, Any], project:
     )
     manufacturer_address = package_config.get("manufacturer_address") or package_config.get("address") or ""
     rows = [
-        ("品牌", product.get("brand", "")),
         ("品名", product.get("name", "")),
-        ("型号", product.get("model", "")),
-        ("材质", product.get("material", "")),
-        ("厂商", manufacturer_name),
+        ("规格型号", product.get("model", "")),
+        ("生产厂家", manufacturer_name),
         ("地址", manufacturer_address),
     ]
     y = 64

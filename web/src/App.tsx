@@ -185,10 +185,6 @@ const productInitialValues: ProductFormValues = {
   name: "",
   brand: "",
   model: "",
-  category: "",
-  material: "",
-  color: "",
-  description: "",
   companyName: "",
   manufacturerName: "",
   manufacturerAddress: "",
@@ -609,6 +605,10 @@ function GeneratePage({
   const [activeWorkbenchPage, setActiveWorkbenchPage] = useState<"home" | "gallery" | "account">("home");
   const [productImage, setProductImage] = useState<File | null>(null);
   const [productImagePreviewUrl, setProductImagePreviewUrl] = useState("");
+  const [certificateReferenceImage, setCertificateReferenceImage] = useState<File | null>(null);
+  const [certificateReferencePreviewUrl, setCertificateReferencePreviewUrl] = useState("");
+  const [packageReferenceImage, setPackageReferenceImage] = useState<File | null>(null);
+  const [packageReferencePreviewUrl, setPackageReferencePreviewUrl] = useState("");
   const [product, setProduct] = useState<ProductResponse | null>(null);
   const [asset, setAsset] = useState<AssetResponse | null>(null);
   const [project, setProject] = useState<ProjectResponse | null>(null);
@@ -713,20 +713,58 @@ function GeneratePage({
     return () => URL.revokeObjectURL(productImagePreviewUrl);
   }, [productImagePreviewUrl]);
 
-  const uploadProps: UploadProps = {
+  useEffect(() => {
+    if (!certificateReferencePreviewUrl) {
+      return;
+    }
+    return () => URL.revokeObjectURL(certificateReferencePreviewUrl);
+  }, [certificateReferencePreviewUrl]);
+
+  useEffect(() => {
+    if (!packageReferencePreviewUrl) {
+      return;
+    }
+    return () => URL.revokeObjectURL(packageReferencePreviewUrl);
+  }, [packageReferencePreviewUrl]);
+
+  const uploadProps = createLocalImageUploadProps((file) => {
+    setProductImage(file);
+    setProductImagePreviewUrl(URL.createObjectURL(file));
+  });
+  const certificateReferenceUploadProps = createLocalImageUploadProps((file) => {
+    setCertificateReferenceImage(file);
+    setCertificateReferencePreviewUrl(URL.createObjectURL(file));
+  });
+  const packageReferenceUploadProps = createLocalImageUploadProps((file) => {
+    setPackageReferenceImage(file);
+    setPackageReferencePreviewUrl(URL.createObjectURL(file));
+  });
+
+  function createLocalImageUploadProps(onFile: (file: File) => void): UploadProps {
+    return {
     accept: "image/png,image/jpeg,image/webp",
     maxCount: 1,
     showUploadList: false,
     beforeUpload(file) {
-      setProductImage(file);
-      setProductImagePreviewUrl(URL.createObjectURL(file));
+      onFile(file);
       return false;
     },
-  };
+    };
+  }
 
   function clearProductImage() {
     setProductImage(null);
     setProductImagePreviewUrl("");
+  }
+
+  function clearCertificateReferenceImage() {
+    setCertificateReferenceImage(null);
+    setCertificateReferencePreviewUrl("");
+  }
+
+  function clearPackageReferenceImage() {
+    setPackageReferenceImage(null);
+    setPackageReferencePreviewUrl("");
   }
 
   async function loadGalleryPage(cursor: string | null = null, pageIndex = 0) {
@@ -900,6 +938,12 @@ function GeneratePage({
 
       const uploadedAsset = await uploadProductOriginal(productImage, createdProduct.id, token);
       setAsset(uploadedAsset);
+      if (certificateReferenceImage) {
+        await uploadReferenceAsset(certificateReferenceImage, createdProduct.id, token, "certificate_reference");
+      }
+      if (packageReferenceImage) {
+        await uploadReferenceAsset(packageReferenceImage, createdProduct.id, token, "package_reference");
+      }
       setLiveProgress(38);
 
       const createdProject = await apiPost<ProjectResponse>(
@@ -1088,6 +1132,67 @@ function GeneratePage({
 
             <Row gutter={12}>
               <Col span={12}>
+                <Form.Item label="合格证参考图">
+                  {certificateReferencePreviewUrl ? (
+                    <div className="upload-preview-card">
+                      <Image
+                        src={certificateReferencePreviewUrl}
+                        alt="已上传合格证参考图预览"
+                        className="upload-preview-image"
+                        preview={{ mask: "放大预览" }}
+                      />
+                      <Button
+                        type="text"
+                        danger
+                        className="upload-delete-button"
+                        aria-label="删除已上传合格证参考图"
+                        icon={<Trash2 size={18} />}
+                        disabled={loading}
+                        onClick={clearCertificateReferenceImage}
+                      />
+                    </div>
+                  ) : (
+                    <Upload.Dragger {...certificateReferenceUploadProps} disabled={loading} className="desktop-uploader">
+                      <UploadCloud size={22} />
+                      <Text strong>上传合格证参考</Text>
+                      <Paragraph>可选，参考样式。</Paragraph>
+                    </Upload.Dragger>
+                  )}
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item label="包装箱参考图">
+                  {packageReferencePreviewUrl ? (
+                    <div className="upload-preview-card">
+                      <Image
+                        src={packageReferencePreviewUrl}
+                        alt="已上传包装箱参考图预览"
+                        className="upload-preview-image"
+                        preview={{ mask: "放大预览" }}
+                      />
+                      <Button
+                        type="text"
+                        danger
+                        className="upload-delete-button"
+                        aria-label="删除已上传包装箱参考图"
+                        icon={<Trash2 size={18} />}
+                        disabled={loading}
+                        onClick={clearPackageReferenceImage}
+                      />
+                    </div>
+                  ) : (
+                    <Upload.Dragger {...packageReferenceUploadProps} disabled={loading} className="desktop-uploader">
+                      <UploadCloud size={22} />
+                      <Text strong>上传包装箱参考</Text>
+                      <Paragraph>可选，参考样式。</Paragraph>
+                    </Upload.Dragger>
+                  )}
+                </Form.Item>
+              </Col>
+            </Row>
+
+            <Row gutter={12}>
+              <Col span={12}>
                 <Form.Item name="name" label="商品名称" rules={[{ required: true, whitespace: true, message: "请输入商品名称" }]}>
                   <Input />
                 </Form.Item>
@@ -1100,34 +1205,12 @@ function GeneratePage({
             </Row>
 
             <Row gutter={12}>
-              <Col span={12}>
-                <Form.Item name="model" label="型号">
-                  <Input />
-                </Form.Item>
-              </Col>
-              <Col span={12}>
-                <Form.Item name="category" label="分类">
+              <Col span={24}>
+                <Form.Item name="model" label="规格型号">
                   <Input />
                 </Form.Item>
               </Col>
             </Row>
-
-            <Row gutter={12}>
-              <Col span={12}>
-                <Form.Item name="material" label="材质">
-                  <Input />
-                </Form.Item>
-              </Col>
-              <Col span={12}>
-                <Form.Item name="color" label="颜色">
-                  <Input />
-                </Form.Item>
-              </Col>
-            </Row>
-
-            <Form.Item name="description" label="详情文案">
-              <Input.TextArea rows={3} />
-            </Form.Item>
 
             <Row gutter={12}>
               <Col span={10}>
@@ -1149,7 +1232,7 @@ function GeneratePage({
 
             <Row gutter={12}>
               <Col span={10}>
-                <Form.Item name="manufacturerName" label="厂商名称" rules={[{ required: true, whitespace: true, message: "请输入厂商名称" }]}>
+                <Form.Item name="manufacturerName" label="生产厂家" rules={[{ required: true, whitespace: true, message: "请输入生产厂家" }]}>
                   <Input />
                 </Form.Item>
               </Col>
@@ -1527,10 +1610,28 @@ function GalleryPreviewImage({ item, token }: { item: OutputResponse; token: str
 }
 
 async function uploadProductOriginal(file: File, productId: string, token: string): Promise<AssetResponse> {
+  return uploadProductBoundAsset(file, productId, token, "product_original");
+}
+
+async function uploadReferenceAsset(
+  file: File,
+  productId: string,
+  token: string,
+  assetType: "certificate_reference" | "package_reference",
+): Promise<AssetResponse> {
+  return uploadProductBoundAsset(file, productId, token, assetType);
+}
+
+async function uploadProductBoundAsset(
+  file: File,
+  productId: string,
+  token: string,
+  assetType: "product_original" | "certificate_reference" | "package_reference",
+): Promise<AssetResponse> {
   const presign = await apiPost<UploadPresignResponse>(
     "/uploads/presign",
     {
-      asset_type: "product_original",
+      asset_type: assetType,
       filename: file.name,
       content_type: file.type || "image/png",
       size_bytes: file.size,

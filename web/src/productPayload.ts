@@ -2,20 +2,12 @@ export type ProductPayloadValues = {
   name: string;
   brand: string;
   model: string;
-  category: string;
-  material: string;
-  color: string;
-  description: string;
 };
 
 type ProductCreatePayload = {
   name: string;
   brand: string;
   model?: string;
-  category?: string;
-  material?: string;
-  color?: string;
-  description?: string;
 };
 
 function text(value: string | undefined): string {
@@ -36,10 +28,6 @@ export function buildProductCreatePayload(values: ProductPayloadValues): Product
   };
 
   assignIfPresent(payload, "model", values.model);
-  assignIfPresent(payload, "category", values.category);
-  assignIfPresent(payload, "material", values.material);
-  assignIfPresent(payload, "color", values.color);
-  assignIfPresent(payload, "description", values.description);
 
   return payload;
 }

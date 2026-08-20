@@ -36,6 +36,7 @@ class MockImageProvider:
         product: dict[str, Any],
         project: dict[str, Any],
         source_image_path: Path | None = None,
+        reference_image_paths: dict[str, Path] | None = None,
     ) -> list[GeneratedMockImage]:
         job_dir = output_dir / job_id
         job_dir.mkdir(parents=True, exist_ok=True)

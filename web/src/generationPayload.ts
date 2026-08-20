@@ -18,6 +18,8 @@ export function buildProjectCreatePayload(values: ProjectPayloadValues, productI
       inspector: values.inspector,
       production_date: values.productionDate,
       company_name: values.companyName,
+      manufacturer_name: values.manufacturerName,
+      manufacturer_address: values.manufacturerAddress,
     },
     package_config: {
       box_material: "kraft",

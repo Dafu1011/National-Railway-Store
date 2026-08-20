@@ -1214,6 +1214,7 @@ def execute_claimed_generation_job(*, job_id: str, storage: AppStorage, runtime_
                 product=product_for_image,
                 project=project_for_image,
                 source_image_path=Path(source_asset["file_path"]),
+                reference_image_paths=get_latest_reference_image_paths(storage, product["id"], user["id"]),
             )
     except Exception as exc:
         if str(exc).startswith("SLOT_BUSY"):
@@ -1401,6 +1402,7 @@ def run_generation_job(
                 product=product_for_image,
                 project=project_for_image,
                 source_image_path=Path(source_asset["file_path"]),
+                reference_image_paths=get_latest_reference_image_paths(storage, product["id"], user["id"]),
             )
     except Exception as exc:
         if str(exc).startswith("SLOT_BUSY"):
@@ -1578,6 +1580,22 @@ def get_asset_version_payload(storage: AppStorage, version_id: str, user_id: str
 
 
 def get_latest_product_original_asset(storage: AppStorage, product_id: str, user_id: str) -> dict[str, Any] | None:
+    return get_latest_product_asset(storage, product_id, user_id, "product_original")
+
+
+def get_latest_reference_image_paths(storage: AppStorage, product_id: str, user_id: str) -> dict[str, Path]:
+    reference_paths: dict[str, Path] = {}
+    for output_type, asset_type in {
+        "certificate": "certificate_reference",
+        "package": "package_reference",
+    }.items():
+        asset = get_latest_product_asset(storage, product_id, user_id, asset_type)
+        if asset and asset.get("file_path"):
+            reference_paths[output_type] = Path(asset["file_path"])
+    return reference_paths
+
+
+def get_latest_product_asset(storage: AppStorage, product_id: str, user_id: str, asset_type: str) -> dict[str, Any] | None:
     with storage.connect() as connection:
         row = connection.execute(
             """
@@ -1593,13 +1611,13 @@ def get_latest_product_original_asset(storage: AppStorage, product_id: str, user
             JOIN asset_versions ON asset_versions.asset_id = assets.id
             WHERE assets.user_id = ?
               AND assets.product_id = ?
-              AND assets.asset_type = 'product_original'
+              AND assets.asset_type = ?
               AND assets.deleted_at IS NULL
               AND assets.status = 'active'
             ORDER BY asset_versions.created_at DESC
             LIMIT 1
             """,
-            (user_id, product_id),
+            (user_id, product_id, asset_type),
         ).fetchone()
     return row_to_dict(row)
 

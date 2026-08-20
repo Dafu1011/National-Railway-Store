@@ -325,6 +325,63 @@ class PhaseOneFlowTests(unittest.TestCase):
                 self.assertEqual(len(generation["outputs"]), 5)
                 self.assertEqual(generation["source_asset"]["asset_type"], "product_original")
 
+    def test_generation_passes_optional_certificate_and_package_reference_assets_to_provider(self):
+        captured_kwargs: list[dict[str, object]] = []
+
+        class CapturingProvider:
+            name = "capturing-provider"
+
+            def generate_five_images(self, **kwargs):
+                captured_kwargs.append(kwargs)
+                job_dir = kwargs["output_dir"] / kwargs["job_id"]
+                job_dir.mkdir(parents=True, exist_ok=True)
+                generated = []
+                for output_type, width, height in phase_one.OUTPUT_SPECS:
+                    path = job_dir / f"{output_type}.png"
+                    Image.new("RGB", (width, height), "white").save(path)
+                    generated.append(GeneratedImage(output_type=output_type, width=width, height=height, path=path))
+                return generated
+
+        original_provider_factory = phase_one.build_image_generation_provider
+        phase_one.build_image_generation_provider = lambda: CapturingProvider()
+        try:
+            with TemporaryDirectory() as data_dir:
+                app = create_app(data_dir=data_dir)
+                with TestClient(app) as client:
+                    token = verified_token(client, "reference-assets@example.com")
+                    headers = {"Authorization": f"Bearer {token}"}
+                    product = client.post(
+                        "/api/v1/products",
+                        headers=headers,
+                        json={"name": "参考图商品", "brand": "智枫", "model": "ZF-REF"},
+                    ).json()
+                    upload_product_original(client, headers, product["id"])
+                    certificate_reference = upload_asset(client, headers, product["id"], "certificate_reference", "certificate.png")
+                    package_reference = upload_asset(client, headers, product["id"], "package_reference", "package.png")
+                    project = client.post(
+                        "/api/v1/projects",
+                        headers=headers,
+                        json={
+                            "product_id": product["id"],
+                            "name": "Reference Asset Project",
+                            "barcode": {"barcode_type": "EAN_13", "raw_value": "4006381333931", "confirmed": True},
+                        },
+                    ).json()
+                    grant_test_points(app, product["user_id"])
+
+                    response = client.post(f"/api/v1/projects/{project['id']}/generate", headers=headers)
+                    self.assertEqual(response.status_code, 202)
+                    wait_for_generation_status(client, headers, response.json()["id"], {"completed"})
+
+        finally:
+            phase_one.build_image_generation_provider = original_provider_factory
+
+        self.assertEqual(len(captured_kwargs), 1)
+        reference_image_paths = captured_kwargs[0]["reference_image_paths"]
+        self.assertEqual(set(reference_image_paths), {"certificate", "package"})
+        self.assertTrue(str(reference_image_paths["certificate"]).endswith(f"{certificate_reference['version_id']}.png"))
+        self.assertTrue(str(reference_image_paths["package"]).endswith(f"{package_reference['version_id']}.png"))
+
     def test_phase_one_user_can_generate_and_download_five_images(self):
         with TemporaryDirectory() as data_dir:
             app = create_app(data_dir=data_dir)
@@ -967,13 +1024,23 @@ def verified_token(client: TestClient, email: str, password: str = "StrongPass12
 
 
 def upload_product_original(client: TestClient, headers: dict[str, str], product_id: str) -> dict[str, object]:
+    return upload_asset(client, headers, product_id, "product_original", "product.png")
+
+
+def upload_asset(
+    client: TestClient,
+    headers: dict[str, str],
+    product_id: str,
+    asset_type: str,
+    filename: str,
+) -> dict[str, object]:
     png = make_png_bytes()
     presign = client.post(
         "/api/v1/uploads/presign",
         headers=headers,
         json={
-            "asset_type": "product_original",
-            "filename": "product.png",
+            "asset_type": asset_type,
+            "filename": filename,
             "content_type": "image/png",
             "size_bytes": len(png),
         },

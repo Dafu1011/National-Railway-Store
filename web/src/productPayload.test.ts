@@ -5,10 +5,6 @@ const baseValues: ProductPayloadValues = {
   name: "智枫蓝牙耳机",
   brand: "智枫",
   model: "",
-  category: "",
-  material: "",
-  color: "",
-  description: "",
 };
 
 describe("product payload", () => {
@@ -33,18 +29,35 @@ describe("product payload", () => {
     expect(payload).not.toHaveProperty("specs");
   });
 
-  it("sends only user-entered optional product fields", () => {
+  it("sends the user-entered specification model only", () => {
     const payload = buildProductCreatePayload({
       ...baseValues,
       model: "ZF-CUP-800",
-      material: "聚乙烯",
     });
 
     expect(payload).toEqual({
       name: "智枫蓝牙耳机",
       brand: "智枫",
       model: "ZF-CUP-800",
-      material: "聚乙烯",
     });
+  });
+
+  it("does not send removed optional fields even if stale form data exists", () => {
+    const payload = buildProductCreatePayload({
+      ...baseValues,
+      category: "日用百货",
+      material: "聚乙烯",
+      color: "白色",
+      description: "用户已经不再填写这个字段",
+    } as ProductPayloadValues);
+
+    expect(payload).toEqual({
+      name: "智枫蓝牙耳机",
+      brand: "智枫",
+    });
+    expect(payload).not.toHaveProperty("category");
+    expect(payload).not.toHaveProperty("material");
+    expect(payload).not.toHaveProperty("color");
+    expect(payload).not.toHaveProperty("description");
   });
 });

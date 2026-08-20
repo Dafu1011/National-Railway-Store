@@ -70,4 +70,15 @@ describe("layout chrome", () => {
     expect(bridgeSource).toContain("onDownloadProgress");
     expect(preloadSource).toContain("updates:download-progress");
   });
+
+  it("shows reference-image upload entries and the renamed form labels", () => {
+    expect(appSource).toContain('label="合格证参考图"');
+    expect(appSource).toContain('label="包装箱参考图"');
+    expect(appSource).toContain('label="规格型号"');
+    expect(appSource).toContain('label="生产厂家"');
+    expect(appSource).not.toContain('label="分类"');
+    expect(appSource).not.toContain('label="材质"');
+    expect(appSource).not.toContain('label="颜色"');
+    expect(appSource).not.toContain('label="详情文案"');
+  });
 });

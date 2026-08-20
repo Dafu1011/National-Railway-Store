@@ -24,6 +24,27 @@ describe("generation payload", () => {
     });
   });
 
+  it("sends production manufacturer and factory address to the certificate config", () => {
+    const payload = buildProjectCreatePayload(
+      {
+        name: "智枫保温杯",
+        companyName: "智枫科技",
+        manufacturerName: "智枫生产厂家",
+        manufacturerAddress: "浙江省杭州市西湖区智枫路88号",
+        productionDate: "2026-07-27",
+        inspector: "QC-01",
+        barcodeType: "EAN_13",
+      },
+      "product-id",
+      "6903244675147",
+    );
+
+    expect(payload.certificate_config).toMatchObject({
+      manufacturer_name: "智枫生产厂家",
+      manufacturer_address: "浙江省杭州市西湖区智枫路88号",
+    });
+  });
+
   it("does not send fixed detail selling points that the user did not enter", () => {
     const payload = buildProjectCreatePayload(
       {
