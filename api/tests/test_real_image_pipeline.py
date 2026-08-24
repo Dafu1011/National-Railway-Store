@@ -3,7 +3,7 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 from app.providers import real_image
 from app.providers.real_image import (
@@ -262,7 +262,7 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("no malformed barcode numerals, no random barcode digits", prompt)
         self.assertIn("no garbled characters, no pseudo text", prompt)
 
-    def test_certificate_prompt_uses_inspector_value_only_inside_qc_stamp(self):
+    def test_certificate_prompt_leaves_inspector_area_for_backend_only(self):
         prompt = _prompt_for(
             "certificate",
             {
@@ -281,12 +281,125 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertNotIn("inspector: QC-01;", prompt)
         self.assertIn("Do not print the inspector parameter value as ordinary black text", prompt)
         self.assertIn("do not show a normal 检验员：QC-01 row", prompt)
-        self.assertIn("stamp must be placed exactly where the inspector value would normally appear", prompt)
-        self.assertIn("Do not render any fixed stamp text such as 检验, 合格, PASS, QC, or inspection result inside the stamp", prompt)
-        self.assertIn("The stamp may contain only the user-entered inspector value", prompt)
-        self.assertIn("the inspector value may be slightly blurred but must not become garbled", prompt)
-        self.assertIn("may cover nearby certificate text", prompt)
-        self.assertIn("must never cover or touch the barcode", prompt)
+        self.assertIn("The only allowed reserved area is the normal inspector-value area on the certificate", prompt)
+        self.assertIn("The backend will render the inspector value after image generation", prompt)
+        self.assertIn("No red circular mark, red oval mark, red ring, red seal, or red ink graphic may appear in the model-generated certificate", prompt)
+        self.assertIn("The inspector value area must stay safely above the barcode and must never touch the barcode", prompt)
+        for forbidden in ("stamp", "QC stamp", "quality inspection stamp", "red stamp", "stamp mark", "质检章"):
+            self.assertNotIn(forbidden.lower(), prompt.lower())
+
+    def test_certificate_qc_stamp_renderer_uses_inspection_label_and_inspector_digits(self):
+        card = Image.new("RGBA", (120, 90), (255, 255, 255, 255))
+        captured_text: list[str] = []
+        original_text = ImageDraw.ImageDraw.text
+
+        def capture_text(self, xy, text, *args, **kwargs):
+            captured_text.append(str(text))
+            return original_text(self, xy, text, *args, **kwargs)
+
+        ImageDraw.ImageDraw.text = capture_text
+        try:
+            real_image._draw_qc_stamp(
+                card,
+                (20, 20),
+                "QC-01",
+                ImageFont.load_default(),
+                ImageFont.load_default(),
+            )
+        finally:
+            ImageDraw.ImageDraw.text = original_text
+
+        self.assertEqual(captured_text, ["检验", "01"])
+
+    def test_certificate_backend_qc_stamp_avoids_detected_barcode(self):
+        image = Image.new("RGB", (800, 800), "white")
+        draw = ImageDraw.Draw(image)
+        for x in range(260, 420, 6):
+            draw.rectangle((x, 650, x + 2, 735), fill=(0, 0, 0))
+        project = {"certificate_config": {"inspector": "QC-01"}}
+
+        result = real_image._overlay_certificate_qc_stamp(image, project, "C:/Windows/Fonts/msyh.ttc").convert("RGB")
+
+        red_in_barcode = 0
+        red_above_barcode = 0
+        for y in range(0, result.height):
+            for x in range(0, result.width):
+                r, g, b = result.getpixel((x, y))
+                if r > 140 and g < 110 and b < 110 and r - max(g, b) > 45:
+                    if 260 <= x <= 420 and 650 <= y <= 735:
+                        red_in_barcode += 1
+                    if 560 <= y < 650:
+                        red_above_barcode += 1
+
+        self.assertEqual(red_in_barcode, 0)
+        self.assertGreater(red_above_barcode, 20)
+
+    def test_certificate_backend_places_qc_stamp_near_inspector_value_area(self):
+        image = Image.new("RGB", (800, 800), "white")
+        draw = ImageDraw.Draw(image)
+        for x in range(260, 420, 6):
+            draw.rectangle((x, 650, x + 2, 735), fill=(0, 0, 0))
+
+        x, y = real_image._certificate_qc_stamp_position(image, (70, 52))
+
+        self.assertLess(x, 260)
+        self.assertGreaterEqual(y, 560)
+        self.assertLessEqual(y + 52, 646)
+
+    def test_certificate_backend_uses_certificate_card_area_when_barcode_is_missing(self):
+        image = Image.new("RGB", (800, 800), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((110, 460, 410, 735), outline=(37, 99, 172), width=3)
+        draw.text((155, 505), "产品合格证", fill=(30, 30, 30))
+        draw.text((140, 655), "检验员:", fill=(30, 30, 30))
+
+        x, y = real_image._certificate_qc_stamp_position(image, (70, 52))
+        card_bbox = real_image._detect_certificate_card_bbox(image)
+        assert card_bbox is not None
+        guard_bbox = real_image._certificate_barcode_guard_bbox(None, card_bbox, image.width, image.height)
+
+        self.assertGreaterEqual(x, 230)
+        self.assertLessEqual(x, 330)
+        self.assertGreaterEqual(y, 590)
+        self.assertLessEqual(y + 52, guard_bbox[1])
+
+    def test_certificate_backend_keeps_stamp_out_of_fallback_barcode_zone(self):
+        image = Image.new("RGB", (800, 800), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((110, 460, 410, 735), outline=(37, 99, 172), width=3)
+        draw.text((155, 505), "产品合格证", fill=(30, 30, 30))
+        draw.text((140, 655), "检验员:", fill=(30, 30, 30))
+
+        _x, y = real_image._certificate_qc_stamp_position(image, (70, 52))
+        card_bbox = real_image._detect_certificate_card_bbox(image)
+        assert card_bbox is not None
+        guard_bbox = real_image._certificate_barcode_guard_bbox(None, card_bbox, image.width, image.height)
+
+        self.assertLessEqual(y + 52, guard_bbox[1])
+
+    def test_certificate_backend_removes_model_generated_red_residue_before_qc_stamp(self):
+        image = Image.new("RGB", (800, 800), "white")
+        draw = ImageDraw.Draw(image)
+        draw.ellipse((140, 620, 215, 650), outline=(198, 45, 45), width=2)
+        for x in range(300, 430, 6):
+            draw.rectangle((x, 700, x + 2, 765), fill=(0, 0, 0))
+        project = {"certificate_config": {"inspector": "QC-01"}}
+
+        result = real_image._overlay_certificate_qc_stamp(image, project, "C:/Windows/Fonts/msyh.ttc").convert("RGB")
+
+        residue_red = 0
+        final_red = 0
+        for y in range(result.height):
+            for x in range(result.width):
+                r, g, b = result.getpixel((x, y))
+                if r > 140 and g < 120 and b < 120 and r - max(g, b) > 35:
+                    if 135 <= x <= 220 and 615 <= y <= 655:
+                        residue_red += 1
+                    if 280 <= x <= 430 and 620 <= y <= 700:
+                        final_red += 1
+
+        self.assertLess(residue_red, 5)
+        self.assertGreater(final_red, 20)
 
     def test_certificate_prompt_lists_required_certificate_fields_and_smaller_qc_stamp(self):
         prompt = _prompt_for(
@@ -304,9 +417,9 @@ class RealImagePipelinePromptTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("Required certificate rows: 品牌, 名称, 规格型号, 生产日期, 生产厂家, 厂址, 检验员 as QC stamp only", prompt)
+        self.assertIn("Required certificate rows: 品牌, 名称, 规格型号, 生产日期, 生产厂家, 厂址, 检验员 value area left blank for backend inspector rendering", prompt)
         self.assertIn("barcode centered horizontally", prompt)
-        self.assertIn("Make the red quality inspection stamp half the previous visual size", prompt)
+        self.assertIn("backend-applied inspector mark remains half the previous visual size", prompt)
         self.assertIn("manufacturer: 智枫生产厂家", prompt)
         self.assertIn("factory address: 吉林省长春市南关区幸福街888号", prompt)
 
@@ -327,6 +440,8 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("A package reference image is provided as an additional reference image", package_prompt)
         self.assertIn("Use the package reference only for packaging style", package_prompt)
         self.assertIn("Package size must be chosen from the real product volume and the user-entered 规格型号/model value", package_prompt)
+        self.assertIn("the visible package must be taller than the nearby individual product's highest point", package_prompt)
+        self.assertIn("overall outer volume must be clearly larger than the product", package_prompt)
 
     def test_package_reference_prompt_does_not_force_kraft_or_plain_carton_style(self):
         prompt = _prompt_for(
@@ -462,10 +577,23 @@ class RealImagePipelinePromptTests(unittest.TestCase):
                 real_image._compose_certificate = original_compose
             certificate = next(output for output in outputs if output.output_type == "certificate")
             with Image.open(certificate.path) as generated:
-                shadow_pixel = generated.convert("RGB").getpixel((575, 705))
+                generated_rgb = generated.convert("RGB")
+                shadow_pixel = generated_rgb.getpixel((575, 705))
+                data = generated_rgb.tobytes()
+                red_pixels = sum(
+                    1
+                    for index in range(0, len(data), 3)
+                    if (
+                        (r := data[index]) > 150
+                        and (g := data[index + 1]) < 100
+                        and (b := data[index + 2]) < 100
+                        and r - max(g, b) > 60
+                    )
+                )
 
         self.assertEqual(compose_calls, [])
         self.assertEqual(shadow_pixel, (222, 222, 220))
+        self.assertGreater(red_pixels, 40)
 
     def test_detail_output_is_allowed_to_be_ecommerce_design(self):
         prompt = _prompt_for(
@@ -523,6 +651,46 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("Adapt the referenced package style to the current product category, product volume, product count, storage needs, and realistic retail packaging logic", prompt)
         self.assertIn("If the reference package belongs to a different product category", prompt)
         self.assertIn("do not copy a packaging proportion, carry structure, visual motif, or premium/cartoon/fresh-food style that would make the final package look mismatched to the current product", prompt)
+
+    def test_package_size_must_fit_product_quantity_from_specification_model(self):
+        prompt = _prompt_for(
+            "package",
+            {"name": "厚抹生乳茶", "brand": "别样泡泡", "model": "500ml×6瓶", "category": "食品饮料"},
+            {"has_package_reference": True, "barcode_type": "EAN_13", "barcode_value": "6903244675147"},
+        )
+
+        self.assertIn("The package must be physically large enough to contain the uploaded product and every unit implied by the user-entered specification model", prompt)
+        self.assertIn("Treat quantity expressions in the specification model, such as 6 bottles, 6 pcs, x6, ×6, 500ml×6瓶, or one box of multiple units, as hard packing capacity requirements", prompt)
+        self.assertIn("Do not generate a package sized for only one unit when the specification model says multiple units", prompt)
+        self.assertIn("Package dimensions, internal volume, divider/spacing allowance, and external proportions must obey real packing physics", prompt)
+        self.assertIn("Package physical capacity has higher priority than reference package style, composition, beauty, and front display completeness", prompt)
+        self.assertIn("The visible package must look larger than the product in every required loading direction", prompt)
+        self.assertIn("For bottle, cup, can, jar, and drink products, the package internal height must be greater than the product height when packed upright", prompt)
+        self.assertIn("If the product is shown standing beside the package, the package must not appear shorter, thinner, or too narrow to contain that product", prompt)
+        self.assertIn("Detected multi-unit bottle specification: 6 bottles", prompt)
+        self.assertIn("Use a six-bottle carton packing structure, not a single-bottle gift box", prompt)
+        self.assertIn("Arrange the internal capacity as 3 bottles by 2 bottles upright", prompt)
+
+    def test_package_bottle_product_should_stand_upright_by_default(self):
+        prompt = _prompt_for(
+            "package",
+            {"name": "果粒橙", "brand": "美汁源", "model": "500ml×6瓶", "category": "食品饮料"},
+            {"has_package_reference": True, "barcode_type": "EAN_13", "barcode_value": "6903244675147"},
+        )
+
+        self.assertIn("For bottles, cans, cups, jars, and stable flat-bottom containers, the product should stand upright beside the package by default", prompt)
+        self.assertIn("Do not lay a bottle, can, cup, jar, or stable flat-bottom container horizontally", prompt)
+        self.assertIn("This upright-container rule has higher priority than the general natural resting pose rule", prompt)
+
+    def test_package_mouse_product_keeps_natural_tabletop_resting_pose(self):
+        prompt = _prompt_for(
+            "package",
+            {"name": "蓝牙鼠标", "brand": "蝰蛇", "model": "ZF-CPU", "category": "电子产品"},
+            {"has_package_reference": True, "barcode_type": "EAN_13", "barcode_value": "6903244675147"},
+        )
+
+        self.assertIn("For desktop-use products, handheld devices, controllers, remotes, mice, keyboards", prompt)
+        self.assertIn("place the product in its real tabletop resting pose", prompt)
 
     def test_package_information_area_and_barcode_stay_on_side_panel(self):
         prompt_with_reference = _prompt_for(

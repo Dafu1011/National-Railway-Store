@@ -5,6 +5,7 @@ from datetime import date
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+import re
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
@@ -89,6 +90,8 @@ class KeleFiveImagePipeline:
             )
             image = _open_provider_image(raw)
             image = _normalize_size(image, width, height, background="white" if output_type in {"main", "certificate", "package"} else "#f3f4f6")
+            if output_type == "certificate":
+                image = _overlay_certificate_qc_stamp(image, project, self.font_path)
             path = job_dir / f"{output_type}.png"
             image.save(path, format="PNG")
             generated.append(GeneratedImage(output_type=output_type, width=image.width, height=image.height, path=path))
@@ -151,7 +154,7 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
         f"barcode digits: {project.get('barcode_value', '')}. "
     )
     certificate_reference_instruction = (
-        "A certificate reference image is provided as an additional reference image. Use the certificate reference only for certificate card style, border style, card material, field layout rhythm, and inspection-stamp style; do not copy its old product data, old barcode digits, old date, old inspector value, camera composition, or product pose. "
+        "A certificate reference image is provided as an additional reference image. Use the certificate reference only for certificate card style, border style, card material, field layout rhythm, and inspector-area layout style; do not copy its old product data, old barcode digits, old date, old inspector value, camera composition, or product pose. "
         if project.get("has_certificate_reference")
         else "No certificate reference image is provided; generate a simple realistic certificate style based on the product and user-entered certificate fields. "
     )
@@ -181,6 +184,19 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
         if has_package_reference
         else "The barcode must be directly below the side information area on the same visible package side panel, following normal retail package layout logic. The barcode and all information rows must remain fully visible, uncropped, unobstructed, and inside the same side panel. The package barcode must not be centered high, placed near the brand wordmark, placed on the front display area, or floating outside the package; it must sit on a real visible package side surface with enough quiet space around it. "
     )
+    package_physical_capacity_instruction = (
+        "The package must be physically large enough to contain the uploaded product and every unit implied by the user-entered specification model. "
+        "Treat quantity expressions in the specification model, such as 6 bottles, 6 pcs, x6, ×6, 500ml×6瓶, or one box of multiple units, as hard packing capacity requirements. "
+        "Do not generate a package sized for only one unit when the specification model says multiple units. "
+        "Package dimensions, internal volume, divider/spacing allowance, and external proportions must obey real packing physics: enough inner length, width, height, padding, grouping space, and closure clearance for the full quantity. "
+        "The visible package must look larger than the product in every required loading direction, not merely taller in the image composition. "
+        "For bottle, cup, can, jar, and drink products, the package internal height must be greater than the product height when packed upright, and its internal width and depth must also be large enough for the product diameter or body width plus realistic padding. "
+        "If the product is shown standing beside the package, the package must not appear shorter, thinner, or too narrow to contain that product; the visible scale relationship must make it obvious that the product can fit inside the package. "
+        "Package physical capacity has higher priority than reference package style, composition, beauty, and front display completeness. "
+        "If the reference package is too small, too thin, too narrow, or shaped for a different quantity, keep only its broad visual style and scale the final package to the current product and specification quantity. "
+    )
+    package_capacity_plan = _package_capacity_plan(product)
+    package_product_pose_instruction = _package_product_pose_instruction(product)
     reference_base = (
         "Use the uploaded product photo as the exact product reference. "
         "The uploaded product photo may be an angled, side, top-down, or non-front view; preserve the real visible product appearance from that view, including visible side geometry, foreshortening, label perspective, seam direction, cap/lid ellipse, logo position, and any occluded or partially visible surfaces. Do not force the product into a generic front-facing, perfectly symmetrical, or redesigned catalog view. When a new scene camera angle is required, re-project the same real product structure into that camera angle while keeping the uploaded-view identity and perspective clues consistent. "
@@ -227,14 +243,14 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
             "Choose the product's orientation from its real structure, center of gravity, and normal display logic; do not mechanically force every product to stand upright. Bottles, thermos cups, cans, boxes, and stable flat-bottom products may stand upright. Drill bits, knife rods, screwdrivers, pen-shaped tools, long accessories, pipes, and other slender unstable products must lie flat or slightly diagonal rather than stand vertically against gravity. Power tools, hardware tools, mechanical parts, and irregular products should contact the support surface on their most stable display face. Soft or flexible products should fall naturally with mild folds. Preserve the source count and relationship for multi-piece sets. "
             "For the uploaded product, choose a natural catalog-safe orientation for its real category after removing any non-product support hardware. Headphones should appear as the headphones alone, with the headband and earcups naturally arranged on the tabletop or in a stable product-only display pose; no black stand, pole, base, rack, mannequin, hook, or hanger may appear. Do not make the product lean unnaturally, tip, float, hover, or balance impossibly. Give it only a very subtle natural rotational angle if needed so the placement feels like a casual real phone snapshot rather than a perfectly staged catalog pose. "
             "The product must physically contact the support surface with a believable contact point: no floating, no tipping, no impossible balance, no intersection, and no detached cutout appearance. Preserve real material details, mild natural highlights, realistic black surface reflections, and one consistent reflection and lighting direction. "
-            "Directly generate both the product and the certificate in one natural photo, directly generate both the product and the certificate in one natural photo; do not reserve an empty area for backend compositing, do not create a cutout, do not paste a later card, and do not make the certificate look like a separate overlay layer. The certificate must be generated by the image model as part of the same camera shot, with the same lens perspective, same white tabletop plane, same lighting direction, and same natural photo texture as the product. "
+            "Directly generate both the product and the certificate in one natural photo, directly generate both the product and the certificate in one natural photo; do not reserve a large empty card area for backend compositing, do not create a cutout, do not paste a later card, and do not make the certificate look like a separate overlay layer. The only allowed reserved area is the normal inspector-value area on the certificate; keep that area clean, blank, and free of red ink graphics for backend inspector-value rendering. The certificate must be generated by the image model as part of the same camera shot, with the same lens perspective, same white tabletop plane, same lighting direction, and same natural photo texture as the product. "
             + certificate_reference_instruction
             + certificate_facts
-            + "Required certificate rows: 品牌, 名称, 规格型号, 生产日期, 生产厂家, 厂址, 检验员 as QC stamp only, and a barcode centered horizontally. Do not render category, material, color, detail copy, company-name-only rows, inspection-result text, or any unentered/old reference-image facts. "
+            + "Required certificate rows: 品牌, 名称, 规格型号, 生产日期, 生产厂家, 厂址, 检验员 value area left blank for backend inspector rendering, and a barcode centered horizontally. Do not render category, material, color, detail copy, company-name-only rows, inspection-result text, or any unentered/old reference-image facts. "
             + "On the certificate, print only user-entered fields that match the visible uploaded product. If a user-entered value conflicts with the visible product category, structure, or appearance, omit that row rather than printing incorrect product information. Do not write capacity, volume, material, model, product name, brand, or specification values that belong to another product type; do not invent replacement values. "
             + "Place the certificate in the same current lower-left area and keep the current reference-like lower-left placement. The certificate should have a lower-left to upper-right diagonal relationship with the product and should sit reasonably close to the product base without touching it. Its visual center should stay around 31% to 35% of image width and 62% to 66% of image height; visual center should be around 31% to 35% of image width and 62% to 66% of image height. "
             "The certificate is a single small horizontal rectangular white hard card or slightly thick paper card, laid flat on the same horizontal tabletop plane as the product. It is not tissue, not folded paper, not stacked sheets, not a standing card, not a portrait sheet, and not a floating overlay; not tissue, not folded, not stacked, not diamond-patterned. The card may have only extremely slight natural paper waviness while retaining clean sharply cut edges and corners; may show only very slight natural paper waviness or tiny surface wrinkles. Its card edges must have no frayed, furry, torn, ragged, or fuzzy edges. Its long edge should remain nearly horizontal with only a slight 3 to 5 degree rotation and share exactly the same tabletop perspective as the product, not a perfectly front-facing rectangle; long edge nearly horizontal with only a slight 3 to 5 degree rotation; not a vertical standing card, not a portrait paper sheet, not a floating overlay. "
-            f"The certificate face must be clear and readable. It should show a clean normal product inspection certificate layout with the title 产品合格证 or 合格证, only the compatible user-entered information rows, one red circular quality inspection stamp replacing any separate inspection-result text, and one small barcode using the entered barcode digits. Do not print 检验结果：合格, 结果：合格, or a standalone 合格 result row as plain text. Do not print the inspector parameter value as ordinary black text; do not show a normal 检验员：QC-01 row, and do not place QC-01 after a 检验员 label as typed table text. The red quality inspection stamp should look like a real inked QC stamp: a thin red circle or oval stamp mark with no fixed stamp wording. Do not render any fixed stamp text such as 检验, 合格, PASS, QC, or inspection result inside the stamp. The stamp may contain only the user-entered inspector value exactly as provided: {_clean_text(certificate_config.get('inspector') or 'QC-01')}. Make the red quality inspection stamp half the previous visual size while keeping the inspector value recognizable; the inspector value may be slightly blurred but must not become garbled, substituted, pseudo text, or random characters. The stamp must be placed exactly where the inspector value would normally appear, as if the red stamp is stamped over the inspector parameter value position; it may cover nearby certificate text or field labels when needed, but it must never cover or touch the barcode, barcode quiet zone, or barcode numerals. For the certificate barcode, render a realistic EAN-style retail barcode centered horizontally on the certificate: the first digit printed outside the barcode bars on the left, the remaining digits printed below the bars in two groups, and a clear center guard before the eighth digit. The start guard, center guard before the eighth digit, and end guard bars must be the longest. Use thin and thick vertical bars with varied bar heights, clean white gaps, realistic quiet zones, and no decorative simplification. barcode numerals must exactly match the entered barcode digits, keep the digits separated and readable below the bars, use regular-weight numerals only, and avoid any scrambled, merged, missing, repeated, invented, or substituted digits; no malformed barcode numerals, no random barcode digits, no pseudo barcode numbers, no distorted barcode numbers, and no barcode-number gibberish. The certificate printing must be black or dark gray ink with a simple blue border if needed; no red triangle stamp, no QR code, no extra marks except the single red quality inspection stamp, no garbled characters, no pseudo text, no random English replacement words, no duplicate text blocks, and no invented unrelated fields. "
+            f"The certificate face must be clear and readable. It should show a clean normal product inspection certificate layout with the title 产品合格证 or 合格证, only the compatible user-entered information rows, the normal inspector-value area reserved for backend inspector rendering, and one small barcode using the entered barcode digits. Do not print 检验结果：合格, 结果：合格, or a standalone 合格 result row as plain text. Do not print the inspector parameter value as ordinary black text; do not show a normal 检验员：QC-01 row, and do not place QC-01 after a 检验员 label as typed table text. No red circular mark, red oval mark, red ring, red seal, or red ink graphic may appear in the model-generated certificate. Do not render 检验, 合格, PASS, QC, inspection-result text, {_clean_text(certificate_config.get('inspector') or 'QC-01')}, inspector digits, pseudo text, or random characters inside the inspector value area. The backend will render the inspector value after image generation, so the model should only leave the normal inspector-value area clean and blank. The backend-applied inspector mark remains half the previous visual size; it may be slightly soft like real ink, but must not contain garbled, substituted, pseudo, or random characters. The inspector value area must stay safely above the barcode and must never touch the barcode, barcode quiet zone, or barcode numerals. For the certificate barcode, render a realistic EAN-style retail barcode centered horizontally on the certificate: the first digit printed outside the barcode bars on the left, the remaining digits printed below the bars in two groups, and a clear center guard before the eighth digit. The start guard, center guard before the eighth digit, and end guard bars must be the longest. Use thin and thick vertical bars with varied bar heights, clean white gaps, realistic quiet zones, and no decorative simplification. barcode numerals must exactly match the entered barcode digits, keep the digits separated and readable below the bars, use regular-weight numerals only, and avoid any scrambled, merged, missing, repeated, invented, or substituted digits; no malformed barcode numerals, no random barcode digits, no pseudo barcode numbers, no distorted barcode numbers, and no barcode-number gibberish. The certificate printing must be black or dark gray ink with a simple blue border if needed; no red triangle mark, no QR code, no red ink graphic, no garbled characters, no pseudo text, no random English replacement words, no duplicate text blocks, and no invented unrelated fields. "
             "Keep a clear lower-left to upper-right diagonal relationship between the certificate and the product. The certificate and product must have a clear white gap, must leave a clear white gap from the product and never slide underneath or cover the product, must never touch or overlap, and the certificate must never slide underneath or cover any portion of the product; do not overlap. Keep both subject areas away from the exact image center. The visual mass should remain mainly in the upper and middle-upper part of the frame while the lower half remains mostly clean pure white negative space. "
             "Use only the referenced product's sellable body on the pure white plane: no props, no desk accessories, no plants, no laptop, no books, no pens, no hands, no packaging box, no extra bottle, no decorative objects, no display stand, no support pole, no base, and no unrelated objects. "
             "Use a high front-left angled top-down phone viewpoint: camera above and slightly in front-left of the horizontal tabletop plane, lens angled downward about 50 to 55 degrees. This is not a full top-down flat-lay and not a straight front view. Use an equivalent 28 to 35 mm phone wide-angle smartphone lens with mild natural near-large/far-small perspective, but no obvious wide-angle stretching, barrel distortion, edge deformation, or exaggerated perspective. "
@@ -251,10 +267,12 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
             + "Create a pure white background product-and-package co-photo with an appropriately sized retail package on the left and the uploaded product placed near the package on the right-side tabletop when physically possible. The product may occupy more horizontal space, sit lower in the frame, appear as a flatter top or side view, or be less visually prominent if that is required by its natural resting pose. Use the uploaded product image as the only visual reference for the product's real outer shape, appearance, visible parts, proportions, material, color, surface texture, markings, and structural relationships; do not copy any pose that depends on a stand, hook, rack, hanger, pole, base, mannequin, or other display support. Output must be exactly 800x800 pixels, 1:1 square, 800x800, 1:1 square. "
             + package_reference_instruction
             + "The scene must keep a clean seamless pure #ffffff white background and a pure white matte tabletop surface. The background and tabletop should visually merge naturally with no visible horizon line, no wall, no table edge, no floor, no colored background, no environmental objects, and no clutter. "
-            "Package size must be chosen from the real product volume and the user-entered 规格型号/model value. Packaging shape and size must adapt to the uploaded product's visible real structure, outer dimensions, folded or storage volume, specification model, and realistic retail packing logic. Do not default to a tall narrow bottle package, high box, or vertical box shape. For headphones or earphones, use a medium-small headphone retail box that is wider and shallower than a bottle package, sized to fit folded or nested earcups and headband; never use a thermos-style package or oversized shipping box for headphones. "
+            "Package size must be chosen from the real product volume and the user-entered 规格型号/model value. Packaging shape and size must adapt to the uploaded product's visible real structure, outer dimensions, folded or storage volume, specification model, and realistic retail packing logic. Hard size rule: the visible package must be taller than the nearby individual product's highest point and its overall outer volume must be clearly larger than the product, so the product can realistically fit inside the package. If the model/specification indicates multiple units, the package must be large enough to hold that full quantity, not just one visible product. Do not make the package lower, smaller, flatter, or visually unable to contain the product just for a prettier composition. Do not default to a tall narrow bottle package, high box, or vertical box shape. For headphones or earphones, use a medium-small headphone retail box that is wider and shallower than a bottle package, sized to fit folded or nested earcups and headband; never use a thermos-style package or oversized shipping box for headphones. "
+            + package_physical_capacity_instruction
+            + package_capacity_plan
             + package_style_instruction
             + "The package must be structurally complete and fully visible in the final frame. Do not crop, truncate, erase, melt, overexpose, or hide the package top, bottom, top flaps, lid seam, handle, front corners, side corners, lower edge, or any outer packaging boundary when that structure exists. The complete packaging silhouette must remain visible and physically plausible. "
-            "Place the appropriately sized package on the left and the product resting area nearby with natural retail-photo spacing. Physical realism has absolute priority over product visibility, product attractiveness, front-facing display, and showing product features. Do not rotate, stand, lean, prop up, or balance the product just to show more of the product. It is acceptable if the product looks lower, flatter, less prominent, less complete, less front-facing, partially less informative, or visually less impressive, as long as it rests naturally according to physics. The package may stand upright or sit at the natural package angle required by its referenced or product-appropriate structure. This package orientation rule applies only to the package, never to the product. The product must not copy the package's upright front-facing orientation. For product placement only, preserve the uploaded product's identity, appearance, visible parts, materials, proportions, and structural relationships, not its original supported display position, camera viewpoint, or canvas orientation. First remove every non-product object from the source reference, including stands, poles, bases, hooks, hangers, racks, mannequins, and invisible support; then choose the product pose from its real-world normal use orientation, normal resting orientation, designed functional contact surface, actual stable contact points, and center of gravity. A product may stand upright only when it is explicitly designed to stand unsupported in normal use or normal retail display and has a clear stable base or designed standing foot. A broad surface alone is not permission to stand the product upright. For desktop-use products, handheld devices, controllers, remotes, mice, keyboards, chargers, power banks, small electronics, tools, and any product with a designed bottom or underside, place the product in its real tabletop resting pose. The designed bottom, underside, feet, pads, base, or normal contact surface must be on the tabletop. The product top should face upward relative to the tabletop, not forward toward the camera. The top/use side may be visible only through a natural camera angle, not by rotating the product upright toward the camera. Do not rotate the product onto its front, tail, side, edge, cable, connector, rounded end, or decorative face just to satisfy a vertical composition. If the normal resting/use pose is horizontal, low, flat, side-lying, or slightly diagonal, keep that pose. The product may occupy more horizontal tabletop area when that is the physically natural resting pose; do not compress, crop, or stand the product to fit a narrow right-side silhouette. Forbidden: standing a normally flat tabletop product vertically on its tail, front, side, edge, curved end, cable, connector, or any narrow contact point. Forbidden: showing a normally flat tabletop product as an upright front-facing object beside the package. Forbidden: using a small contact shadow to fake physical contact while the product is actually vertical. For products that need an external stand, hook, rack, hanger, pole, base, or mannequin to remain upright, unsupported vertical placement is forbidden after those supports are removed. Hard rule for headphones and earphones: when no visible stand or support fixture is included, vertical or upright placement is forbidden. The entire headphones must lie flat, side-lying, or low diagonal on the tabletop; the headband, both earcups, cable, inline control, and microphone must all rest on or visibly contact the tabletop. Do not support headphones only on one earcup edge or a narrow earcup rim, and do not let the headband rise as a free-standing arch. Do not let headphones balance upright on one edge, float, hover, lean without support, stand on a cable, or hang in the air. They may sit visually close but must not intersect. For this package co-photo, realistic consistent contact shadows directly beneath all tabletop contact points are required so the product and package feel photographed together rather than composited separately. "
+            + package_product_pose_instruction
             + package_front_geometry_instruction
             + package_side_instruction
             + "The package front must have no unnecessary artificial printed border unless that border style comes from the package reference. The ordinary package information area must be on the visible package side panel only. Do not create a front information area; the package front may carry the large brand wordmark, product image, product illustration, or decorative visual design, but ordinary information rows and barcode must stay on the side panel. The model must directly print the package text and barcode on the package surface as native ink or printed packaging graphics, not as a floating sticker, not as an overlay, and not as a separate label. "
@@ -289,6 +307,127 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
 
 def _clean_text(value: object) -> str:
     return str(value or "").strip()
+
+
+def _package_capacity_plan(product: dict[str, Any]) -> str:
+    model = _clean_text(product.get("model", ""))
+    name = _clean_text(product.get("name", ""))
+    category = _clean_text(product.get("category", ""))
+    quantity = _extract_package_quantity(model)
+    if quantity < 2:
+        return ""
+
+    product_hint = f"{name} {category} {model}".lower()
+    bottle_like = any(
+        token in product_hint
+        for token in ("瓶", "饮", "茶", "乳", "奶", "juice", "drink", "bottle", "beverage", "ml")
+    )
+    if not bottle_like:
+        return (
+            f"Detected multi-unit product specification: {quantity} units. "
+            "Use a multi-unit retail carton structure, not a single-unit gift box. "
+            "The package must visibly fit all units plus dividers, padding, grouping space, and closure clearance. "
+        )
+
+    if quantity == 6:
+        return (
+            "Detected multi-unit bottle specification: 6 bottles. "
+            "Use a six-bottle carton packing structure, not a single-bottle gift box. "
+            "Arrange the internal capacity as 3 bottles by 2 bottles upright, with realistic divider and padding allowance. "
+            "The package width must visibly fit three bottle diameters plus dividers, the package depth must visibly fit two bottle diameters plus dividers, and the package height must exceed the full bottle height including cap. "
+            "In the final co-photo, the package's visible top edge must sit higher than the top of the adjacent single bottle, and the package must look large enough to physically contain all 6 bottles. "
+            "The shown package may be wider and deeper than a simple front display box; physical fit is more important than making the package compact or elegant. "
+        )
+
+    return (
+        f"Detected multi-unit bottle specification: {quantity} bottles. "
+        "Use a multi-bottle retail carton packing structure, not a single-bottle gift box. "
+        "Choose an upright internal bottle grid that visibly fits the full quantity plus dividers, padding, and closure clearance. "
+    )
+
+
+def _package_product_pose_instruction(product: dict[str, Any]) -> str:
+    product_hint = " ".join(
+        _clean_text(product.get(key, ""))
+        for key in ("name", "brand", "model", "category")
+    ).lower()
+    stable_container = any(
+        token in product_hint
+        for token in ("瓶", "罐", "杯", "饮", "茶", "乳", "奶", "juice", "drink", "bottle", "beverage", "can", "cup", "jar", "ml")
+    )
+    unstable_tabletop_product = any(
+        token in product_hint
+        for token in (
+            "鼠标",
+            "耳机",
+            "键盘",
+            "遥控",
+            "手柄",
+            "工具",
+            "电钻",
+            "螺丝刀",
+            "mouse",
+            "headphone",
+            "earphone",
+            "keyboard",
+            "remote",
+            "controller",
+            "tool",
+        )
+    )
+
+    package_intro = (
+        "Place the appropriately sized package on the left and the product resting area nearby with natural retail-photo spacing. "
+        "The package may stand upright or sit at the natural package angle required by its referenced or product-appropriate structure. "
+        "This package orientation rule applies only to the package, never to the product. "
+        "For product placement only, preserve the uploaded product's identity, appearance, visible parts, materials, proportions, and structural relationships, not its original supported display position, camera viewpoint, or canvas orientation. "
+        "First remove every non-product object from the source reference, including stands, poles, bases, hooks, hangers, racks, mannequins, and invisible support; then choose the product pose from its real-world normal use orientation, normal resting orientation, designed functional contact surface, actual stable contact points, and center of gravity. "
+    )
+    stable_container_rule = (
+        "For bottles, cans, cups, jars, and stable flat-bottom containers, the product should stand upright beside the package by default. "
+        "Do not lay a bottle, can, cup, jar, or stable flat-bottom container horizontally unless the uploaded product is visibly damaged, has no stable bottom, or the user explicitly requests a lying pose. "
+        "The container bottom must naturally contact the tabletop, the cap or lid should remain above the body, and the product should look like a normal retail bottle display. "
+        "This upright-container rule has higher priority than the general natural resting pose rule, product visibility rule, and package composition rule. "
+    )
+    tabletop_rule = (
+        "Physical realism has absolute priority over product visibility, product attractiveness, front-facing display, and showing product features for products without a stable standing base. "
+        "Do not rotate, stand, lean, prop up, or balance the product just to show more of the product. "
+        "It is acceptable if the product looks lower, flatter, less prominent, less complete, less front-facing, partially less informative, or visually less impressive, as long as it rests naturally according to physics. "
+        "A broad surface alone is not permission to stand the product upright. "
+        "For desktop-use products, handheld devices, controllers, remotes, mice, keyboards, chargers, power banks, small electronics, tools, and any product with a designed bottom or underside, place the product in its real tabletop resting pose. "
+        "The designed bottom, underside, feet, pads, base, or normal contact surface must be on the tabletop. "
+        "The product top should face upward relative to the tabletop, not forward toward the camera. "
+        "The top/use side may be visible only through a natural camera angle, not by rotating the product upright toward the camera. "
+        "Do not rotate the product onto its front, tail, side, edge, cable, connector, rounded end, or decorative face just to satisfy a vertical composition. "
+        "If the normal resting/use pose is horizontal, low, flat, side-lying, or slightly diagonal, keep that pose. "
+        "The product may occupy more horizontal tabletop area when that is the physically natural resting pose; do not compress, crop, or stand the product to fit a narrow right-side silhouette. "
+        "Forbidden: standing a normally flat tabletop product vertically on its tail, front, side, edge, curved end, cable, connector, or any narrow contact point. "
+        "Forbidden: showing a normally flat tabletop product as an upright front-facing object beside the package. "
+        "Forbidden: using a small contact shadow to fake physical contact while the product is actually vertical. "
+        "For products that need an external stand, hook, rack, hanger, pole, base, or mannequin to remain upright, unsupported vertical placement is forbidden after those supports are removed. "
+        "Hard rule for headphones and earphones: when no visible stand or support fixture is included, vertical or upright placement is forbidden. "
+        "The entire headphones must lie flat, side-lying, or low diagonal on the tabletop; the headband, both earcups, cable, inline control, and microphone must all rest on or visibly contact the tabletop. "
+        "Do not support headphones only on one earcup edge or a narrow earcup rim, and do not let the headband rise as a free-standing arch. "
+        "Do not let headphones balance upright on one edge, float, hover, lean without support, stand on a cable, or hang in the air. "
+    )
+    contact_shadow_rule = (
+        "For this package co-photo, realistic consistent contact shadows directly beneath all tabletop contact points are required so the product and package feel photographed together rather than composited separately. "
+    )
+
+    if stable_container and not unstable_tabletop_product:
+        return package_intro + stable_container_rule + contact_shadow_rule
+    return package_intro + tabletop_rule + contact_shadow_rule
+
+
+def _extract_package_quantity(model: str) -> int:
+    candidates: list[int] = []
+    for pattern in (
+        r"[xX×*]\s*(\d{1,3})",
+        r"(\d{1,3})\s*(?:瓶|罐|杯|支|个|件|pcs?|PCS?)",
+    ):
+        candidates.extend(int(match) for match in re.findall(pattern, model))
+
+    return max(candidates) if candidates else 1
 
 
 def _package_information_rows(
@@ -538,10 +677,31 @@ def _draw_qc_stamp(card: Image.Image, xy: tuple[int, int], inspector: str, stamp
     draw = ImageDraw.Draw(card)
     x, y = xy
     red = (198, 45, 45, 220)
-    draw.ellipse((x, y, x + 50, y + 34), outline=red, width=2)
-    draw.line((x + 5, y + 17, x + 45, y + 17), fill=red, width=1)
-    draw.text((x + 14, y + 4), "检验", fill=red, font=stamp_font)
-    draw.text((x + 9, y + 18), inspector, fill=red, font=value_font)
+    stamp_width = 50
+    stamp_height = 34
+    center_y = y + stamp_height // 2
+    value = _qc_stamp_value(inspector)
+
+    draw.ellipse((x, y, x + stamp_width, y + stamp_height), outline=red, width=2)
+    draw.line((x + 5, center_y, x + stamp_width - 5, center_y), fill=red, width=2)
+    label_bbox = draw.textbbox((0, 0), "检验", font=stamp_font)
+    label_width = label_bbox[2] - label_bbox[0]
+    value_bbox = draw.textbbox((0, 0), value, font=value_font)
+    value_width = value_bbox[2] - value_bbox[0]
+    value_height = value_bbox[3] - value_bbox[1]
+    draw.text((x + (stamp_width - label_width) / 2, y + 3), "检验", fill=red, font=stamp_font)
+    draw.text((x + (stamp_width - value_width) / 2, center_y + (stamp_height // 2 - value_height) / 2 - 1), value, fill=red, font=value_font)
+
+
+def _qc_stamp_value(inspector: str) -> str:
+    text = str(inspector or "").strip()
+    digit_groups = re.findall(r"\d+", text)
+    if digit_groups:
+        digits = digit_groups[-1]
+        if len(digits) == 1:
+            return f"0{digits}"
+        return digits[-3:] if len(digits) > 3 else digits
+    return _clip(text, 4) or "01"
 
 
 def _flatten_certificate_for_tabletop(card: Image.Image) -> Image.Image:
@@ -561,6 +721,241 @@ def _flatten_certificate_for_tabletop(card: Image.Image) -> Image.Image:
 
 def _paste_tabletop_paper(base: Image.Image, overlay: Image.Image, xy: tuple[int, int]) -> None:
     _paste_rgba_plain(base, overlay, xy)
+
+
+def _detect_certificate_barcode_bbox(image: Image.Image) -> tuple[int, int, int, int] | None:
+    grayscale = image.convert("L")
+    width, height = grayscale.size
+    x_limit = int(width * 0.62)
+    y_start = int(height * 0.58)
+    dark_columns: list[int] = []
+
+    for x in range(x_limit):
+        dark_count = 0
+        for y in range(y_start, height):
+            if grayscale.getpixel((x, y)) < 75:
+                dark_count += 1
+        if dark_count >= 24:
+            dark_columns.append(x)
+
+    if not dark_columns:
+        return None
+
+    runs: list[tuple[int, int]] = []
+    run_start = dark_columns[0]
+    previous = dark_columns[0]
+    for x in dark_columns[1:]:
+        if x - previous <= 8:
+            previous = x
+            continue
+        runs.append((run_start, previous))
+        run_start = x
+        previous = x
+    runs.append((run_start, previous))
+
+    candidates = [(x0, x1) for x0, x1 in runs if x1 - x0 >= 40]
+    if not candidates:
+        return None
+
+    x0, x1 = max(candidates, key=lambda item: item[1] - item[0])
+    y_values = [
+        y
+        for y in range(y_start, height)
+        for x in range(x0, x1 + 1)
+        if grayscale.getpixel((x, y)) < 75
+    ]
+    if not y_values:
+        return None
+
+    return x0, min(y_values), x1, max(y_values)
+
+
+def _detect_certificate_card_bbox(image: Image.Image) -> tuple[int, int, int, int] | None:
+    source = image.convert("RGB")
+    width, height = source.size
+    x_limit = int(width * 0.68)
+    y_start = int(height * 0.34)
+    blue_pixels: list[tuple[int, int]] = []
+    ink_pixels: list[tuple[int, int]] = []
+
+    for y in range(y_start, height):
+        for x in range(x_limit):
+            red, green, blue = source.getpixel((x, y))
+            if blue > 105 and blue > red + 25 and blue > green + 12 and red < 170:
+                blue_pixels.append((x, y))
+            if min(red, green, blue) < 205 and not _is_red_artifact_pixel((red, green, blue)):
+                ink_pixels.append((x, y))
+
+    for pixels, padding, min_width_ratio, min_height_ratio in (
+        (blue_pixels, 16, 0.18, 0.11),
+        (ink_pixels, 28, 0.24, 0.18),
+    ):
+        if len(pixels) < 40:
+            continue
+        xs = [x for x, _ in pixels]
+        ys = [y for _, y in pixels]
+        left = max(0, min(xs) - padding)
+        top = max(0, min(ys) - padding)
+        right = min(width - 1, max(xs) + padding)
+        bottom = min(height - 1, max(ys) + padding)
+        if right - left >= int(width * min_width_ratio) and bottom - top >= int(height * min_height_ratio):
+            return left, top, right, bottom
+
+    return None
+
+
+def _is_red_artifact_pixel(pixel: tuple[int, int, int]) -> bool:
+    red, green, blue = pixel
+    return red > 105 and green < 155 and blue < 155 and red - max(green, blue) > 18
+
+
+def _bbox_contains(bbox: tuple[int, int, int, int], x: int, y: int) -> bool:
+    left, top, right, bottom = bbox
+    return left <= x <= right and top <= y <= bottom
+
+
+def _expand_bbox(
+    bbox: tuple[int, int, int, int],
+    padding: int,
+    width: int,
+    height: int,
+) -> tuple[int, int, int, int]:
+    left, top, right, bottom = bbox
+    return (
+        max(0, left - padding),
+        max(0, top - padding),
+        min(width - 1, right + padding),
+        min(height - 1, bottom + padding),
+    )
+
+
+def _local_non_red_surface_color(source: Image.Image, x: int, y: int) -> tuple[int, int, int]:
+    width, height = source.size
+    for radius in (4, 8, 12, 18):
+        samples: list[tuple[int, int, int]] = []
+        for yy in range(max(0, y - radius), min(height, y + radius + 1)):
+            for xx in range(max(0, x - radius), min(width, x + radius + 1)):
+                pixel = source.getpixel((xx, yy))
+                if _is_red_artifact_pixel(pixel):
+                    continue
+                samples.append(pixel)
+        if samples:
+            return tuple(sum(pixel[channel] for pixel in samples) // len(samples) for channel in range(3))
+    return 255, 255, 255
+
+
+def _remove_certificate_red_artifacts(image: Image.Image) -> Image.Image:
+    cleaned = image.convert("RGB")
+    width, height = cleaned.size
+    barcode_bbox = _detect_certificate_barcode_bbox(cleaned)
+    barcode_guard = _expand_bbox(barcode_bbox, 14, width, height) if barcode_bbox else None
+    x_limit = int(width * 0.66)
+    y_start = int(height * 0.42)
+    red_pixels: set[tuple[int, int]] = set()
+
+    for y in range(y_start, height):
+        for x in range(x_limit):
+            if barcode_guard and _bbox_contains(barcode_guard, x, y):
+                continue
+            if _is_red_artifact_pixel(cleaned.getpixel((x, y))):
+                red_pixels.add((x, y))
+
+    source = cleaned.copy()
+    pixels = cleaned.load()
+    visited: set[tuple[int, int]] = set()
+    for pixel in list(red_pixels):
+        if pixel in visited:
+            continue
+        stack = [pixel]
+        visited.add(pixel)
+        component: list[tuple[int, int]] = []
+        while stack:
+            x, y = stack.pop()
+            component.append((x, y))
+            for neighbor_x in (x - 1, x, x + 1):
+                for neighbor_y in (y - 1, y, y + 1):
+                    neighbor = (neighbor_x, neighbor_y)
+                    if neighbor in red_pixels and neighbor not in visited:
+                        visited.add(neighbor)
+                        stack.append(neighbor)
+
+        if len(component) < 8:
+            continue
+        xs = [x for x, _ in component]
+        ys = [y for _, y in component]
+        component_width = max(xs) - min(xs) + 1
+        component_height = max(ys) - min(ys) + 1
+        if component_width > 140 or component_height > 100:
+            continue
+
+        for x, y in component:
+            pixels[x, y] = _local_non_red_surface_color(source, x, y)
+
+    return cleaned.convert(image.mode)
+
+
+def _certificate_qc_stamp_position(base: Image.Image, stamp_size: tuple[int, int]) -> tuple[int, int]:
+    width, height = base.size
+    stamp_width, stamp_height = stamp_size
+    barcode_bbox = _detect_certificate_barcode_bbox(base)
+    card_bbox = _detect_certificate_card_bbox(base)
+    if card_bbox is not None:
+        card_left, card_top, card_right, card_bottom = card_bbox
+        card_width = card_right - card_left + 1
+        card_height = card_bottom - card_top + 1
+        x = card_left + int(card_width * 0.58) - stamp_width // 2
+        y = card_top + int(card_height * 0.74) - int(stamp_height * 0.58)
+        x = max(card_left + 4, min(x, card_right - stamp_width - 4))
+        y = max(card_top + int(card_height * 0.52), min(y, card_bottom - stamp_height - 4))
+
+        barcode_guard = _certificate_barcode_guard_bbox(barcode_bbox, card_bbox, width, height)
+        stamp_bbox = (x, y, x + stamp_width, y + stamp_height)
+        if _bbox_intersects(stamp_bbox, barcode_guard):
+            y = barcode_guard[1] - stamp_height - 4
+            y = max(card_top + int(card_height * 0.52), min(y, barcode_guard[1] - stamp_height - 4))
+        return x, y
+
+    if barcode_bbox is None:
+        safe_bottom = int(height * 0.72)
+        return int(width * 0.29), min(int(height * 0.76), safe_bottom - stamp_height)
+
+    barcode_x0, barcode_y0, barcode_x1, _ = barcode_bbox
+    x = barcode_x0 - int(stamp_width * 0.35)
+    x = max(int(width * 0.12), min(x, barcode_x1 - stamp_width))
+    y = barcode_y0 - stamp_height - 4
+    y = max(int(height * 0.50), min(y, barcode_y0 - stamp_height - 4))
+    return x, y
+
+
+def _bbox_intersects(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> bool:
+    return first[0] <= second[2] and first[2] >= second[0] and first[1] <= second[3] and first[3] >= second[1]
+
+
+def _certificate_barcode_guard_bbox(
+    barcode_bbox: tuple[int, int, int, int] | None,
+    card_bbox: tuple[int, int, int, int],
+    width: int,
+    height: int,
+) -> tuple[int, int, int, int]:
+    if barcode_bbox is not None:
+        return _expand_bbox(barcode_bbox, 14, width, height)
+
+    card_left, card_top, card_right, card_bottom = card_bbox
+    card_height = card_bottom - card_top + 1
+    guard_top = card_top + int(card_height * 0.70)
+    return card_left, guard_top, card_right, card_bottom
+
+
+def _overlay_certificate_qc_stamp(image: Image.Image, project: dict[str, Any], font_path: str) -> Image.Image:
+    config = project.get("certificate_config", {}) if isinstance(project.get("certificate_config", {}), dict) else {}
+    inspector = _clip(config.get("inspector") or "QC-01", 10)
+    base = _remove_certificate_red_artifacts(image).convert("RGBA")
+    stamp = Image.new("RGBA", (70, 52), (0, 0, 0, 0))
+    _draw_qc_stamp(stamp, (10, 9), inspector, _font(10, font_path), _font(11, font_path))
+    stamp = stamp.rotate(-2.5, resample=Image.Resampling.BICUBIC, expand=True)
+    stamp = stamp.filter(ImageFilter.GaussianBlur(0.25))
+    base.alpha_composite(stamp, _certificate_qc_stamp_position(base, stamp.size))
+    return base.convert(image.mode)
 
 
 def _perspective_coefficients(
