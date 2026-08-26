@@ -50,6 +50,7 @@ import { buildProjectCreatePayload } from "./generationPayload";
 import { accountDisplayName, transactionDetailText } from "./accountDisplay";
 import { buildProductCreatePayload, type ProductPayloadValues } from "./productPayload";
 import { generationErrorMessage } from "./generationErrors";
+import { userFacingErrorMessage } from "./userFacingErrors";
 import { pageForAuthState } from "./navigation";
 import {
   createGalleryPreviews,
@@ -778,7 +779,7 @@ function GeneratePage({
       setGalleryPageIndex(pageIndex);
       setGalleryLoaded(true);
     } catch (error) {
-      message.error(generationErrorMessage(error));
+      message.error(userFacingErrorMessage(error, "gallery"));
     } finally {
       setGalleryLoading(false);
     }
@@ -833,7 +834,7 @@ function GeneratePage({
       anchor.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
-      message.error(generationErrorMessage(error));
+      message.error(userFacingErrorMessage(error, "download"));
     }
   }
 
@@ -847,7 +848,7 @@ function GeneratePage({
       setAccount(accountPayload);
       setAccountTransactions(transactionsPayload.items);
     } catch (error) {
-      message.error(generationErrorMessage(error));
+      message.error(userFacingErrorMessage(error, "account"));
     } finally {
       setAccountLoading(false);
     }
@@ -887,7 +888,7 @@ function GeneratePage({
       setUpdateDownloadProgress(100);
       message.info("安装包已开始下载，请下载完成后运行安装。");
     } catch (error) {
-      message.error(`更新失败：${errorDisplayMessage(error)}`);
+      message.error(errorDisplayMessage(error));
     } finally {
       unsubscribeProgress?.();
       setInstallingUpdate(false);
@@ -1688,7 +1689,7 @@ function isNoReleaseAvailableError(error: unknown): boolean {
 }
 
 function errorDisplayMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "未知错误";
+  return userFacingErrorMessage(error, "update");
 }
 
 function formatExpiry(value?: string): string {

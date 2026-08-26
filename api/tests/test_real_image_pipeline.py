@@ -283,10 +283,32 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("do not show a normal 检验员：QC-01 row", prompt)
         self.assertIn("The only allowed reserved area is the normal inspector-value area on the certificate", prompt)
         self.assertIn("The backend will render the inspector value after image generation", prompt)
-        self.assertIn("No red circular mark, red oval mark, red ring, red seal, or red ink graphic may appear in the model-generated certificate", prompt)
+        self.assertIn("keep the inspector-value area clean and blank", prompt)
         self.assertIn("The inspector value area must stay safely above the barcode and must never touch the barcode", prompt)
-        for forbidden in ("stamp", "QC stamp", "quality inspection stamp", "red stamp", "stamp mark", "质检章"):
+        for forbidden in ("QC stamp", "quality inspection stamp", "red stamp", "stamp mark", "质检章"):
             self.assertNotIn(forbidden.lower(), prompt.lower())
+
+    def test_certificate_prompt_isolates_backend_inspector_mark_from_product_without_banning_real_red_product_parts(self):
+        prompt = _prompt_for(
+            "certificate",
+            {
+                "name": "空气开关",
+                "brand": "德力西电气",
+                "model": "10个",
+                "category": "hardware",
+            },
+            {
+                "barcode_type": "EAN_13",
+                "barcode_value": "6903244675147",
+                "certificate_config": {"production_date": "2026-08-26", "inspector": "QC-01"},
+            },
+        )
+
+        self.assertIn("Product red elements are allowed only when they already exist in the uploaded product reference", prompt)
+        self.assertIn("do not transfer certificate inspector-area semantics onto the product", prompt)
+        self.assertIn("certificate-only inspector area must not appear on product switches", prompt)
+        self.assertIn("Do not run any global red-color removal", prompt)
+        self.assertNotIn("No red circular mark, red oval mark, red ring, red seal", prompt)
 
     def test_certificate_qc_stamp_renderer_uses_inspection_label_and_inspector_digits(self):
         card = Image.new("RGBA", (120, 90), (255, 255, 255, 255))
@@ -346,6 +368,141 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertGreaterEqual(y, 560)
         self.assertLessEqual(y + 52, 646)
 
+    def test_certificate_barcode_detection_ignores_upper_table_columns(self):
+        image = Image.new("RGB", (800, 800), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((75, 410, 435, 705), outline=(37, 99, 172), width=3)
+        for x in range(235, 345, 22):
+            draw.line((x, 470, x, 610), fill=(35, 35, 35), width=2)
+        for x in range(180, 360, 6):
+            draw.rectangle((x, 625, x + 2, 690), fill=(0, 0, 0))
+
+        barcode_bbox = real_image._detect_certificate_barcode_bbox(image)
+
+        self.assertIsNotNone(barcode_bbox)
+        assert barcode_bbox is not None
+        self.assertGreaterEqual(barcode_bbox[1], 620)
+
+    def test_certificate_barcode_detection_covers_middle_lower_card_area(self):
+        image = Image.new("RGB", (800, 800), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((110, 430, 410, 735), outline=(37, 99, 172), width=3)
+        for x in range(230, 360, 6):
+            draw.rectangle((x, 575, x + 2, 635), fill=(0, 0, 0))
+
+        barcode_bbox = real_image._detect_certificate_barcode_bbox(image)
+
+        self.assertIsNotNone(barcode_bbox)
+        assert barcode_bbox is not None
+        self.assertLessEqual(barcode_bbox[1], 580)
+
+    def test_certificate_backend_qc_stamp_avoids_middle_lower_barcode(self):
+        image = Image.new("RGB", (800, 800), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((110, 430, 410, 735), outline=(37, 99, 172), width=3)
+        for x in range(230, 360, 6):
+            draw.rectangle((x, 575, x + 2, 635), fill=(0, 0, 0))
+        project = {"certificate_config": {"inspector": "QC-01"}}
+
+        result = real_image._overlay_certificate_qc_stamp(image, project, "C:/Windows/Fonts/msyh.ttc").convert("RGB")
+
+        red_in_barcode = 0
+        red_on_card = 0
+        for y in range(result.height):
+            for x in range(result.width):
+                r, g, b = result.getpixel((x, y))
+                if r > 140 and g < 120 and b < 120 and r - max(g, b) > 35:
+                    if 224 <= x <= 366 and 569 <= y <= 641:
+                        red_in_barcode += 1
+                    if 110 <= x <= 410 and 430 <= y <= 735:
+                        red_on_card += 1
+
+        self.assertEqual(red_in_barcode, 0)
+        self.assertGreater(red_on_card, 20)
+
+    def test_certificate_card_detection_ignores_unrelated_upper_blue_product_pixels(self):
+        image = Image.new("RGB", (800, 800), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((300, 260, 360, 315), fill=(50, 90, 180))
+        draw.rectangle((110, 430, 410, 735), outline=(37, 99, 172), width=3)
+        draw.text((155, 475), "产品合格证", fill=(30, 30, 30))
+
+        card_bbox = real_image._detect_certificate_card_bbox(image)
+
+        self.assertIsNotNone(card_bbox)
+        assert card_bbox is not None
+        self.assertGreaterEqual(card_bbox[1], 410)
+
+    def test_certificate_card_detection_aggregates_fragmented_blue_border(self):
+        image = Image.new("RGB", (800, 800), "white")
+        draw = ImageDraw.Draw(image)
+        blue = (37, 99, 172)
+        for box in (
+            (110, 430, 190, 433),
+            (250, 430, 410, 433),
+            (110, 732, 230, 735),
+            (290, 732, 410, 735),
+            (110, 430, 113, 520),
+            (110, 610, 113, 735),
+            (407, 430, 410, 540),
+            (407, 620, 410, 735),
+        ):
+            draw.rectangle(box, fill=blue)
+        draw.text((165, 475), "产品合格证", fill=(30, 30, 30))
+
+        card_bbox = real_image._detect_certificate_card_bbox(image)
+
+        self.assertIsNotNone(card_bbox)
+        assert card_bbox is not None
+        self.assertLessEqual(card_bbox[0], 100)
+        self.assertLessEqual(card_bbox[1], 420)
+        self.assertGreaterEqual(card_bbox[2], 420)
+        self.assertGreaterEqual(card_bbox[3], 745)
+
+    def test_certificate_qc_stamp_defaults_near_inspector_area_above_barcode(self):
+        image = Image.new("RGB", (800, 800), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((110, 430, 410, 735), outline=(37, 99, 172), width=3)
+        draw.text((135, 610), "检验员:", fill=(30, 30, 30))
+        for x in range(190, 360, 6):
+            draw.rectangle((x, 660, x + 2, 725), fill=(0, 0, 0))
+
+        x, y = real_image._certificate_qc_stamp_position(image, (62, 48))
+        barcode_bbox = real_image._detect_certificate_barcode_bbox(image)
+
+        self.assertIsNotNone(barcode_bbox)
+        assert barcode_bbox is not None
+        self.assertGreaterEqual(x, 255)
+        self.assertLessEqual(x, 330)
+        self.assertLessEqual(y + 48, barcode_bbox[1] - 10)
+        self.assertGreaterEqual(y, 570)
+
+    def test_certificate_backend_removes_upper_model_stamp_before_safe_backend_stamp(self):
+        image = Image.new("RGB", (800, 800), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((110, 430, 410, 735), outline=(37, 99, 172), width=3)
+        draw.text((155, 475), "产品合格证", fill=(30, 30, 30))
+        draw.ellipse((250, 385, 312, 425), outline=(198, 45, 45), width=2)
+        for x in range(210, 350, 6):
+            draw.rectangle((x, 655, x + 2, 720), fill=(0, 0, 0))
+        project = {"certificate_config": {"inspector": "QC-01"}}
+
+        result = real_image._overlay_certificate_qc_stamp(image, project, "C:/Windows/Fonts/msyh.ttc").convert("RGB")
+
+        leaked_red = 0
+        safe_red = 0
+        for y in range(result.height):
+            for x in range(result.width):
+                r, g, b = result.getpixel((x, y))
+                if r > 140 and g < 120 and b < 120 and r - max(g, b) > 35:
+                    if 245 <= x <= 317 and 380 <= y <= 430:
+                        leaked_red += 1
+                    if 245 <= x <= 330 and 560 <= y <= 650:
+                        safe_red += 1
+
+        self.assertLess(leaked_red, 5)
+        self.assertGreater(safe_red, 20)
+
     def test_certificate_backend_uses_certificate_card_area_when_barcode_is_missing(self):
         image = Image.new("RGB", (800, 800), "white")
         draw = ImageDraw.Draw(image)
@@ -360,7 +517,7 @@ class RealImagePipelinePromptTests(unittest.TestCase):
 
         self.assertGreaterEqual(x, 230)
         self.assertLessEqual(x, 330)
-        self.assertGreaterEqual(y, 590)
+        self.assertGreaterEqual(y, 540)
         self.assertLessEqual(y + 52, guard_bbox[1])
 
     def test_certificate_backend_keeps_stamp_out_of_fallback_barcode_zone(self):
@@ -376,6 +533,20 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         guard_bbox = real_image._certificate_barcode_guard_bbox(None, card_bbox, image.width, image.height)
 
         self.assertLessEqual(y + 52, guard_bbox[1])
+
+    def test_certificate_stamp_position_requires_card_bounds_and_barcode_clearance(self):
+        card_bbox = (100, 400, 320, 620)
+        barcode_guard = (100, 535, 320, 620)
+
+        self.assertFalse(
+            real_image._certificate_stamp_position_is_valid((170, 510), (60, 44), card_bbox, barcode_guard)
+        )
+        self.assertFalse(
+            real_image._certificate_stamp_position_is_valid((70, 470), (60, 44), card_bbox, barcode_guard)
+        )
+        self.assertTrue(
+            real_image._certificate_stamp_position_is_valid((170, 475), (60, 44), card_bbox, barcode_guard)
+        )
 
     def test_certificate_backend_removes_model_generated_red_residue_before_qc_stamp(self):
         image = Image.new("RGB", (800, 800), "white")
@@ -442,6 +613,8 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("Package size must be chosen from the real product volume and the user-entered 规格型号/model value", package_prompt)
         self.assertIn("the visible package must be taller than the nearby individual product's highest point", package_prompt)
         self.assertIn("overall outer volume must be clearly larger than the product", package_prompt)
+        self.assertIn("make the package length and width about 1.3x larger than that current minimum-fit package size", package_prompt)
+        self.assertIn("do not stretch, squeeze, warp, or distort package text, logos, barcode, illustrations, or surface graphics", package_prompt)
 
     def test_package_reference_prompt_does_not_force_kraft_or_plain_carton_style(self):
         prompt = _prompt_for(
@@ -1165,7 +1338,9 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertNotIn("规格：", prompt)
         self.assertIn("no garbled characters, no pseudo text, no random English replacement words", prompt)
         self.assertIn("barcode digits must be clear, regular weight, and not bold", prompt)
+        self.assertIn("barcode digits must not be missing, truncated, omitted, substituted, reordered, or incomplete", prompt)
         self.assertIn("not bold, not blurry, not thickened, not smeared", prompt)
+        self.assertIn("no malformed barcode shape, no broken barcode structure, no decorative fake barcode shape", prompt)
         self.assertIn("first digit outside the barcode bars on the left", prompt)
         self.assertIn("start guard two bars, center guard two bars before the eighth digit, and end guard two bars are the longest", prompt)
         self.assertIn("bars must vary naturally in width and height like a real EAN retail barcode", prompt)

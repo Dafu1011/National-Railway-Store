@@ -5,6 +5,36 @@ export type ApiErrorPayload = {
   request_id: string;
 };
 
+export class ApiClientError extends Error {
+  code: string;
+  status: number;
+  rawMessage: string;
+  requestId: string;
+  details: Record<string, unknown>;
+
+  constructor({
+    code,
+    status,
+    rawMessage,
+    requestId = "",
+    details = {},
+  }: {
+    code: string;
+    status: number;
+    rawMessage: string;
+    requestId?: string;
+    details?: Record<string, unknown>;
+  }) {
+    super(code);
+    this.name = "ApiClientError";
+    this.code = code;
+    this.status = status;
+    this.rawMessage = rawMessage;
+    this.requestId = requestId;
+    this.details = details;
+  }
+}
+
 type RequestOptions = {
   token?: string;
 };
@@ -66,19 +96,41 @@ async function throwApiError(response: Response): Promise<never> {
     try {
       payload = JSON.parse(text) as ApiErrorPayload | { detail?: { code?: string; message?: string } };
     } catch {
-      throw new Error(`HTTP_${response.status}: ${text}`);
+      throw new ApiClientError({
+        code: `HTTP_${response.status}`,
+        status: response.status,
+        rawMessage: text,
+      });
     }
   }
   if (!payload) {
-    throw new Error(`HTTP_${response.status}: ${response.statusText || "Request failed"}`);
+    throw new ApiClientError({
+      code: `HTTP_${response.status}`,
+      status: response.status,
+      rawMessage: response.statusText || "Request failed",
+    });
   }
   if ("detail" in payload && payload.detail?.code) {
-    throw new Error(`${payload.detail.code}: ${payload.detail.message}`);
+    throw new ApiClientError({
+      code: payload.detail.code,
+      status: response.status,
+      rawMessage: payload.detail.message || response.statusText || "Request failed",
+    });
   }
   if ("code" in payload) {
-    throw new Error(`${payload.code}: ${payload.message}`);
+    throw new ApiClientError({
+      code: payload.code,
+      status: response.status,
+      rawMessage: payload.message || response.statusText || "Request failed",
+      requestId: payload.request_id,
+      details: payload.details,
+    });
   }
-  throw new Error(`HTTP_${response.status}`);
+  throw new ApiClientError({
+    code: `HTTP_${response.status}`,
+    status: response.status,
+    rawMessage: response.statusText || "Request failed",
+  });
 }
 
 function makeHeaders(token?: string, json = false): HeadersInit {
