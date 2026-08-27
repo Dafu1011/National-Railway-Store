@@ -28,8 +28,8 @@ const contentTypes = {
 
 function resolveWindowIconPath() {
   const candidates = [
-    path.join(__dirname, "..", "dist", "brand", "zf-logo.ico"),
-    path.join(__dirname, "..", "public", "brand", "zf-logo.ico"),
+    path.join(__dirname, "..", "dist", "brand", "hz-logo.ico"),
+    path.join(__dirname, "..", "public", "brand", "hz-logo.ico"),
   ];
   return candidates.find((candidate) => fs.existsSync(candidate));
 }
@@ -221,7 +221,7 @@ async function startElectronApp() {
       minHeight: 720,
       autoHideMenuBar: true,
       backgroundColor: "#eceeed",
-      title: "Zhifeng Image",
+      title: "绘智作",
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
@@ -395,7 +395,7 @@ function resolveUpdatesDirectory(appModule) {
   if (appModule && typeof appModule.getPath === "function") {
     return path.join(appModule.getPath("userData"), "updates");
   }
-  return path.join(os.tmpdir(), "zhifeng-image-updates");
+  return path.join(os.tmpdir(), "huizhizuo-updates");
 }
 
 async function writeResponseBodyToFile(response, filePath, { totalBytes = 0, onProgress } = {}) {
@@ -463,7 +463,7 @@ function sha256File(filePath) {
 function installerFileName(update) {
   const version = sanitizeFileNamePart(update.latest_version);
   const arch = sanitizeFileNamePart(update.arch || "x64");
-  return `zhifeng-image-${version}-${arch}.exe`;
+  return `huizhizuo-${version}-${arch}.exe`;
 }
 
 function sanitizeFileNamePart(value) {

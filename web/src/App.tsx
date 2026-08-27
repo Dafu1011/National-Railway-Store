@@ -321,7 +321,7 @@ function ProtectedRoute({ token, children }: { token: string; children: JSX.Elem
 function BrandMark() {
   return (
     <span className="brand-mark" aria-hidden="true">
-      <img src="/brand/zf-logo.png" alt="" draggable={false} />
+      <img src="/brand/hz-logo.png" alt="" draggable={false} />
     </span>
   );
 }
@@ -455,9 +455,9 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (auth: AuthResponse) 
 
   return (
     <main className="desktop-shell login-shell">
-      <section className="source-stage login-stage" aria-label="智枫生图登录">
+      <section className="source-stage login-stage" aria-label="绘智作登录">
         <AmbientLayer />
-        <div className="login-center-logo" aria-label="智枫生图">
+        <div className="login-center-logo" aria-label="绘智作">
           <BrandMark />
         </div>
         <div className="login-hero panel-dark">
@@ -466,7 +466,7 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (auth: AuthResponse) 
               <span className="hero-brand-logo">
                 <BrandMark />
               </span>
-              <span>Zhifeng Image</span>
+              <span>绘智作</span>
             </div>
           </div>
           <div>
@@ -884,7 +884,7 @@ function GeneratePage({
         message.success("安装程序已启动");
         return;
       }
-      triggerBrowserDownload(updateDownloadHref(updateInfo.download_url), `zhifeng-image-${updateInfo.latest_version}.exe`);
+      triggerBrowserDownload(updateDownloadHref(updateInfo.download_url), `huizhizuo-${updateInfo.latest_version}.exe`);
       setUpdateDownloadProgress(100);
       message.info("安装包已开始下载，请下载完成后运行安装。");
     } catch (error) {
@@ -1031,13 +1031,13 @@ function GeneratePage({
 
   return (
     <main className="desktop-shell workbench-shell">
-      <section className="source-stage workbench-stage" aria-label="智枫生图生成工作台">
+      <section className="source-stage workbench-stage" aria-label="绘智作生成工作台">
         <AmbientLayer />
       <header className="app-topbar">
         <div className="topbar-brand">
           <BrandMark />
           <div>
-            <strong>智枫生图</strong>
+            <strong>绘智作</strong>
             <span>V2.0 商品五图生成台</span>
           </div>
         </div>

@@ -131,6 +131,7 @@ test("downloadUpdateInstaller reports installer download progress", async () => 
     );
 
     assert.equal(fs.existsSync(installerPath), true);
+    assert.equal(path.basename(installerPath), "huizhizuo-2.0.12-x64.exe");
     assert.equal(sha256File(installerPath), cryptoHash(installerBytes));
     assert.equal(progressEvents.at(-1).percent, 100);
     assert.equal(progressEvents.at(-1).received_bytes, installerBytes.length);

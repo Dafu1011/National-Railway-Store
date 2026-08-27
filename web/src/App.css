@@ -269,9 +269,9 @@ button:focus-visible,
 
 .brand-mark {
   display: inline-flex;
-  width: 54px;
-  height: 32px;
-  flex: 0 0 54px;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
   align-items: center;
   justify-content: center;
 }
@@ -313,9 +313,9 @@ button:focus-visible,
 }
 
 .login-center-logo .brand-mark {
-  width: 162px;
-  height: 96px;
-  flex-basis: 162px;
+  width: 118px;
+  height: 118px;
+  flex-basis: 118px;
 }
 
 .hero-title.ant-typography {

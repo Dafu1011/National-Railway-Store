@@ -3,10 +3,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const projectRoot = path.resolve(__dirname, "..");
-const portableAppDir = path.join(projectRoot, "desktop-portable", "zhifeng-image");
+const portableAppDir = path.join(projectRoot, "desktop-portable", "huizhizuo");
 const portableInstallerDir = path.join(projectRoot, "desktop-installer");
 const portableInstallerCurrentDir = path.join(projectRoot, "desktop-installer-single");
-const portableDisplayExeName = "智枫生图.exe";
+const portableDisplayExeName = "绘智作.exe";
 
 function main() {
   if (process.argv.includes("--prepare-only")) {
@@ -66,7 +66,7 @@ function preparePortableApp() {
     throw new Error(`Electron runtime is missing ${electronExe}`);
   }
   const portableDisplayExe = path.join(portableAppDir, portableDisplayExeName);
-  const portableIconSourceExe = path.join(portableAppDir, "zhifeng-image-icon-source.exe");
+  const portableIconSourceExe = path.join(portableAppDir, "huizhizuo-icon-source.exe");
   fs.copyFileSync(electronExe, portableIconSourceExe);
   applyPortableExeIcon(portableIconSourceExe);
   fs.copyFileSync(portableIconSourceExe, portableDisplayExe);
@@ -129,7 +129,7 @@ function portableMainShimContents() {
 }
 
 function portableIconPath() {
-  return path.join(projectRoot, "public", "brand", "zf-logo.ico");
+  return path.join(projectRoot, "public", "brand", "hz-logo.ico");
 }
 
 function rceditIconArgs(exePath) {

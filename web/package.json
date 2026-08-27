@@ -1,8 +1,8 @@
 {
-  "name": "zhifeng-image-web",
-  "version": "2.0.16",
-  "description": "Zhifeng Image desktop workbench",
-  "author": "Zhifeng",
+  "name": "huizhizuo-web",
+  "version": "2.0.17",
+  "description": "Huizhizuo desktop workbench",
+  "author": "Huizhizuo",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -40,8 +40,8 @@
     "wait-on": "^9.1.0"
   },
   "build": {
-    "appId": "com.zhifeng.image.desktop",
-    "productName": "智枫生图",
+    "appId": "com.huizhizuo.image.desktop",
+    "productName": "绘智作",
     "directories": {
       "output": "desktop-release"
     },
@@ -52,7 +52,7 @@
     ],
     "asar": true,
     "win": {
-      "icon": "public/brand/zf-logo.ico",
+      "icon": "public/brand/hz-logo.ico",
       "target": [
         {
           "target": "nsis",

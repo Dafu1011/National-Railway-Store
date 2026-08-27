@@ -18,13 +18,20 @@ test("portable main shim does not bake local absolute paths into the exe", () =>
   assert.equal(portableMainShimContents().includes("C:\\"), false);
 });
 
-test("portable app executable uses the ZF icon resource", () => {
+test("portable app executable uses the Huizhizuo icon resource", () => {
   const { portableIconPath, rceditIconArgs } = loadBuildPortableModuleForTest();
   const projectRoot = path.resolve(__dirname, "..");
-  const iconPath = path.join(projectRoot, "public", "brand", "zf-logo.ico");
+  const iconPath = path.join(projectRoot, "public", "brand", "hz-logo.ico");
 
   assert.equal(portableIconPath(), iconPath);
   assert.deepEqual(rceditIconArgs("app.exe"), ["app.exe", "--set-icon", iconPath]);
+});
+
+test("portable app executable display name uses the Huizhizuo product name", () => {
+  const source = fs.readFileSync(path.join(__dirname, "build-portable.cjs"), "utf8");
+
+  assert.match(source, /const portableDisplayExeName = "绘智作\.exe";/);
+  assert.equal(source.includes("智枫生图.exe"), false);
 });
 
 function loadBuildPortableModuleForTest() {
