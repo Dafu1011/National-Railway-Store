@@ -67,6 +67,27 @@ describe("output previews", () => {
     expect(previews.map((preview) => preview.id)).toEqual(["available-output-id"]);
   });
 
+  it("skips failed quality outputs instead of attempting blocked downloads", async () => {
+    const outputs: OutputResponse[] = [
+      { id: "main-id", output_type: "main", width: 800, height: 800, quality_status: "passed" },
+      { id: "certificate-id", output_type: "certificate", width: 800, height: 800, quality_status: "failed" },
+      { id: "package-id", output_type: "package", width: 800, height: 800, quality_status: "passed" },
+    ];
+    const downloaded: string[] = [];
+
+    const previews = await createOutputPreviews(
+      outputs,
+      async (output) => {
+        downloaded.push(output.id);
+        return new Blob([output.id], { type: "image/png" });
+      },
+      (blob) => `blob://${blob.size}`,
+    );
+
+    expect(downloaded).toEqual(["main-id", "package-id"]);
+    expect(previews.map((preview) => preview.id)).toEqual(["main-id", "package-id"]);
+  });
+
   it("uses gallery thumbnails for previews when the API provides them", () => {
     const output: OutputResponse = {
       id: "thumb-output-id",

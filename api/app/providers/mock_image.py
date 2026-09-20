@@ -161,9 +161,9 @@ def _draw_certificate(
     font_body: ImageFont.ImageFont,
     font_small: ImageFont.ImageFont,
 ) -> None:
-    x0, y0, x1, y1 = 430, 145, 745, 610
-    draw.rectangle((x0, y0, x1, y1), fill=(255, 255, 255), outline=(15, 23, 42), width=3)
-    draw.text((x0 + 34, y0 + 28), "产品合格证", fill=(15, 23, 42), font=font_title)
+    x0, y0, x1, y1 = 330, 520, 540, 660
+    draw.rectangle((x0, y0, x1, y1), fill=(255, 255, 255), outline=(0, 87, 165), width=3)
+    draw.text((x0 + 24, y0 + 12), "产品合格证", fill=(15, 23, 42), font=font_small)
     lines = [
         f"品名: {product.get('name', '')}",
         f"品牌: {product.get('brand', '')}",
@@ -171,8 +171,8 @@ def _draw_certificate(
         "检验: 合格",
     ]
     for index, line in enumerate(lines):
-        draw.text((x0 + 24, y0 + 100 + index * 42), line[:18], fill=(15, 23, 42), font=font_body)
-    _draw_barcode(draw, x0 + 38, y1 - 128, project["barcode_value"], font_small)
+        draw.text((x0 + 14, y0 + 38 + index * 18), line[:16], fill=(15, 23, 42), font=font_small)
+    _draw_barcode(draw, x0 + 14, y1 - 56, project["barcode_value"], font_small)
 
 
 def _draw_package(

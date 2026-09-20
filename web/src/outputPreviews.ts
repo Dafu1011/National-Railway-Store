@@ -18,8 +18,9 @@ export async function createOutputPreviews(
   createUrl: (blob: Blob) => string,
   options: { preserveOrder?: boolean; ignoreDownloadErrors?: boolean } = {},
 ): Promise<PreviewImage[]> {
+  const downloadableOutputs = outputs.filter((output) => output.quality_status === "passed");
   const previewResults = await Promise.allSettled(
-    outputs.map(async (output) => {
+    downloadableOutputs.map(async (output) => {
       const blob = await download(output);
       return { ...output, url: createUrl(blob) };
     }),

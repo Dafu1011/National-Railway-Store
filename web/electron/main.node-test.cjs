@@ -141,6 +141,92 @@ test("downloadUpdateInstaller reports installer download progress", async () => 
   }
 });
 
+test("update install handler returns launch result before scheduling app quit", async () => {
+  const { createUpdateInstallHandler } = require("./main.cjs");
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "zhifeng-update-handler-"));
+  const installerBytes = Buffer.from("fake installer bytes for handler");
+  const events = [];
+  const handler = createUpdateInstallHandler({
+    appModule: {
+      getPath: () => rootDir,
+    },
+    apiBaseUrl: "http://api.local:8088",
+    fetchImpl: async () => ({
+      ok: true,
+      body: Readable.from([installerBytes]),
+    }),
+    launchInstallerImpl: (installerPath) => {
+      events.push(["launch", path.basename(installerPath)]);
+    },
+    scheduleQuit: () => {
+      events.push(["quit"]);
+    },
+  });
+
+  try {
+    const result = await handler(
+      {
+        sender: {
+          send: () => {},
+        },
+      },
+      {
+        download_url: "/api/v1/updates/releases/release-2-0-18/download",
+        latest_version: "2.0.18",
+        platform: "windows",
+        arch: "x64",
+        file_size_bytes: installerBytes.length,
+        sha256: "",
+      },
+    );
+
+    assert.deepEqual(result, {
+      installer_path: path.join(rootDir, "updates", "huizhizuo-2.0.18-x64.exe"),
+      launched: true,
+    });
+    assert.deepEqual(events, [["launch", "huizhizuo-2.0.18-x64.exe"]]);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("launchInstaller opens the Windows installer through Electron shell", async () => {
+  const { launchInstaller } = require("./main.cjs");
+  const calls = [];
+  await launchInstaller(
+    "C:\\Users\\Public\\huizhizuo-update.exe",
+    undefined,
+    "win32",
+    {
+      openPath: async (installerPath) => {
+        calls.push(installerPath);
+        return "";
+      },
+    },
+  );
+
+  assert.deepEqual(calls, ["C:\\Users\\Public\\huizhizuo-update.exe"]);
+});
+
+test("launchInstaller falls back to a file URL when Windows cannot open the path", async () => {
+  const { launchInstaller } = require("./main.cjs");
+  const calls = [];
+  await launchInstaller(
+    "C:\\Users\\Public\\huizhizuo-update.exe",
+    undefined,
+    "win32",
+    {
+      openPath: async () => "The system cannot find the file specified.",
+      openExternal: async (fileUrl) => {
+        calls.push(fileUrl);
+        return "";
+      },
+    },
+  );
+
+  assert.deepEqual(calls, ["file:///C:/Users/Public/huizhizuo-update.exe"]);
+});
+
 function cryptoHash(buffer) {
   return require("node:crypto").createHash("sha256").update(buffer).digest("hex");
 }

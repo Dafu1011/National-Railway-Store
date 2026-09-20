@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from fastapi.testclient import TestClient
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from app.api import phase_one
 from app.main import create_app
@@ -338,7 +338,11 @@ class PhaseOneFlowTests(unittest.TestCase):
                 generated = []
                 for output_type, width, height in phase_one.OUTPUT_SPECS:
                     path = job_dir / f"{output_type}.png"
-                    Image.new("RGB", (width, height), "white").save(path)
+                    image = Image.new("RGB", (width, height), "white")
+                    if output_type == "certificate":
+                        draw = ImageDraw.Draw(image)
+                        draw.rectangle((330, 520, 540, 660), fill=(248, 248, 246), outline=(0, 87, 165), width=3)
+                    image.save(path)
                     generated.append(GeneratedImage(output_type=output_type, width=width, height=height, path=path))
                 return generated
 
@@ -598,6 +602,64 @@ class PhaseOneFlowTests(unittest.TestCase):
                     self.assertEqual(rows[0]["provider_name"], "failing-provider")
                     self.assertEqual(rows[0]["error_code"], "IMAGE_PROVIDER_FAILED")
                     self.assertIn("KELE_HTTP_429", rows[0]["error_message"])
+        finally:
+            phase_one.build_image_generation_provider = original_provider_factory
+
+    def test_generation_allows_readable_large_product_certificate_card(self):
+        class ReadableCertificateProvider:
+            name = "readable-certificate-provider"
+
+            def generate_five_images(self, **kwargs):
+                job_dir = kwargs["output_dir"] / kwargs["job_id"]
+                job_dir.mkdir(parents=True, exist_ok=True)
+                generated = []
+                for output_type, width, height in phase_one.OUTPUT_SPECS:
+                    path = job_dir / f"{output_type}.png"
+                    image = Image.new("RGB", (width, height), "white")
+                    draw = ImageDraw.Draw(image)
+                    if output_type == "certificate":
+                        draw.rectangle((30, 120, 760, 610), fill=(25, 25, 25))
+                        draw.rectangle((300, 620, 560, 775), fill=(248, 248, 246), outline=(0, 87, 165), width=3)
+                    image.save(path)
+                    generated.append(GeneratedImage(output_type=output_type, width=width, height=height, path=path))
+                return generated
+
+        original_provider_factory = phase_one.build_image_generation_provider
+        phase_one.build_image_generation_provider = lambda: ReadableCertificateProvider()
+        try:
+            with TemporaryDirectory() as data_dir:
+                app = create_app(data_dir=data_dir)
+                with TestClient(app) as client:
+                    token = verified_token(client, "readable-certificate@example.com")
+                    headers = {"Authorization": f"Bearer {token}"}
+                    product = client.post(
+                        "/api/v1/products",
+                        headers=headers,
+                        json={"name": "手推式扫雪机", "brand": "星枫月恒", "model": "6.5马力", "category": "大型清洁机械"},
+                    ).json()
+                    upload_product_original(client, headers, product["id"])
+                    project = client.post(
+                        "/api/v1/projects",
+                        headers=headers,
+                        json={
+                            "product_id": product["id"],
+                            "name": "Readable Certificate Project",
+                            "barcode": {"barcode_type": "EAN_13", "raw_value": "6979051758366", "confirmed": True},
+                        },
+                    ).json()
+
+                    grant_test_points(app, product["user_id"])
+                    response = client.post(f"/api/v1/projects/{project['id']}/generate", headers=headers)
+                    completed_job = wait_for_generation_status(client, headers, response.json()["id"], {"completed"})
+                    outputs = client.get(f"/api/v1/projects/{project['id']}/outputs", headers=headers).json()["items"]
+                    certificate = next(output for output in outputs if output["output_type"] == "certificate")
+                    download_response = client.get(f"/api/v1/outputs/{certificate['id']}/download", headers=headers)
+
+                    self.assertEqual(response.status_code, 202)
+                    self.assertEqual(completed_job["status"], "completed")
+                    self.assertIsNone(completed_job["error_code"])
+                    self.assertEqual(certificate["quality_status"], "passed")
+                    self.assertEqual(download_response.status_code, 200)
         finally:
             phase_one.build_image_generation_provider = original_provider_factory
 
@@ -975,6 +1037,25 @@ class PhaseOneFlowTests(unittest.TestCase):
             self.assertEqual(provider.edit_size, "1024x1024")
             self.assertEqual(provider.provider.config.base_url, "https://code28.ccwu.cc/v1")
             self.assertEqual(provider.provider.config.model, "gpt-image-2")
+        finally:
+            for key, value in original_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_kele_provider_defaults_to_1024_image_size(self):
+        env_keys = ["IMAGE_PROVIDER", "KELE_API_KEY", "KELE_API_BASE_URL", "KELE_IMAGE_SIZE"]
+        original_env = {key: os.environ.get(key) for key in env_keys}
+        try:
+            os.environ["IMAGE_PROVIDER"] = "kele"
+            os.environ["KELE_API_KEY"] = "test-key"
+            os.environ.pop("KELE_API_BASE_URL", None)
+            os.environ.pop("KELE_IMAGE_SIZE", None)
+
+            provider = phase_one.build_image_generation_provider()
+
+            self.assertEqual(provider.edit_size, "1024x1024")
         finally:
             for key, value in original_env.items():
                 if value is None:

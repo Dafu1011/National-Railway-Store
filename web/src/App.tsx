@@ -606,6 +606,8 @@ function GeneratePage({
   const [activeWorkbenchPage, setActiveWorkbenchPage] = useState<"home" | "gallery" | "account">("home");
   const [productImage, setProductImage] = useState<File | null>(null);
   const [productImagePreviewUrl, setProductImagePreviewUrl] = useState("");
+  const [logoImage, setLogoImage] = useState<File | null>(null);
+  const [logoPreviewUrl, setLogoPreviewUrl] = useState("");
   const [certificateReferenceImage, setCertificateReferenceImage] = useState<File | null>(null);
   const [certificateReferencePreviewUrl, setCertificateReferencePreviewUrl] = useState("");
   const [packageReferenceImage, setPackageReferenceImage] = useState<File | null>(null);
@@ -715,6 +717,13 @@ function GeneratePage({
   }, [productImagePreviewUrl]);
 
   useEffect(() => {
+    if (!logoPreviewUrl) {
+      return;
+    }
+    return () => URL.revokeObjectURL(logoPreviewUrl);
+  }, [logoPreviewUrl]);
+
+  useEffect(() => {
     if (!certificateReferencePreviewUrl) {
       return;
     }
@@ -731,6 +740,10 @@ function GeneratePage({
   const uploadProps = createLocalImageUploadProps((file) => {
     setProductImage(file);
     setProductImagePreviewUrl(URL.createObjectURL(file));
+  });
+  const logoUploadProps = createLocalImageUploadProps((file) => {
+    setLogoImage(file);
+    setLogoPreviewUrl(URL.createObjectURL(file));
   });
   const certificateReferenceUploadProps = createLocalImageUploadProps((file) => {
     setCertificateReferenceImage(file);
@@ -756,6 +769,11 @@ function GeneratePage({
   function clearProductImage() {
     setProductImage(null);
     setProductImagePreviewUrl("");
+  }
+
+  function clearLogoImage() {
+    setLogoImage(null);
+    setLogoPreviewUrl("");
   }
 
   function clearCertificateReferenceImage() {
@@ -945,6 +963,9 @@ function GeneratePage({
       if (packageReferenceImage) {
         await uploadReferenceAsset(packageReferenceImage, createdProduct.id, token, "package_reference");
       }
+      if (logoImage) {
+        await uploadProductBoundAsset(logoImage, createdProduct.id, token, "logo");
+      }
       setLiveProgress(38);
 
       const createdProject = await apiPost<ProjectResponse>(
@@ -1038,7 +1059,7 @@ function GeneratePage({
           <BrandMark />
           <div>
             <strong>绘智作</strong>
-            <span>V2.0 商品五图生成台</span>
+            <span>V2.0 商品图生成台</span>
           </div>
         </div>
         <nav className="topbar-nav" aria-label="工作台导航">
@@ -1127,6 +1148,34 @@ function GeneratePage({
                   <UploadCloud size={26} />
                   <Text strong>选择或拖入商品图片</Text>
                   <Paragraph>PNG / JPEG / WebP，图片模型只处理视觉素材。</Paragraph>
+                </Upload.Dragger>
+              )}
+            </Form.Item>
+
+            <Form.Item label="品牌 Logo 参考图">
+              {logoPreviewUrl ? (
+                <div className="upload-preview-card">
+                  <Image
+                    src={logoPreviewUrl}
+                    alt="已上传品牌 Logo 预览"
+                    className="upload-preview-image"
+                    preview={{ mask: "放大预览" }}
+                  />
+                  <Button
+                    type="text"
+                    danger
+                    className="upload-delete-button"
+                    aria-label="删除已上传品牌 Logo"
+                    icon={<Trash2 size={18} />}
+                    disabled={loading}
+                    onClick={clearLogoImage}
+                  />
+                </div>
+              ) : (
+                <Upload.Dragger {...logoUploadProps} disabled={loading} className="desktop-uploader">
+                  <UploadCloud size={22} />
+                  <Text strong>上传品牌 Logo（可选）</Text>
+                  <Paragraph>生成主图时放置在左上角。</Paragraph>
                 </Upload.Dragger>
               )}
             </Form.Item>
@@ -1288,7 +1337,7 @@ function GeneratePage({
                 <Sparkles size={13} />
                 AI-Native Workbench
               </Tag>
-              <Title level={2}>五图生成工作台</Title>
+              <Title level={2}>商品图生成工作台</Title>
               <Paragraph>
                 源图进入模型生成视觉内容；正式文字、合格证字段和条码由系统后置合成，保证下载前的质量门槛。
               </Paragraph>
@@ -1627,7 +1676,7 @@ async function uploadProductBoundAsset(
   file: File,
   productId: string,
   token: string,
-  assetType: "product_original" | "certificate_reference" | "package_reference",
+  assetType: "product_original" | "certificate_reference" | "package_reference" | "logo",
 ): Promise<AssetResponse> {
   const presign = await apiPost<UploadPresignResponse>(
     "/uploads/presign",

@@ -6,6 +6,9 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 
+import httpx
+
+import app.providers.kele as kele_module
 from app.providers.kele import KeleConfig, KeleGptImage2Provider
 
 
@@ -131,6 +134,80 @@ class KeleProviderTests(unittest.TestCase):
         self.assertEqual(result, b"\x89PNG\r\n\x1a\nurl-image")
         self.assertEqual(seen_urls, ["https://cdn.example/generated.png|321"])
 
+    def test_default_url_fetcher_sends_image_headers_and_requires_image_response(self):
+        captured: dict[str, object] = {}
+        original_get = kele_module.httpx.get
+
+        class FakeResponse:
+            content = b"\x89PNG\r\n\x1a\nurl-image"
+            headers = {"content-type": "image/png"}
+            status_code = 200
+
+            def raise_for_status(self) -> None:
+                return None
+
+        def fake_get(url: str, **kwargs: object) -> FakeResponse:
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return FakeResponse()
+
+        kele_module.httpx.get = fake_get
+        try:
+            result = kele_module._default_url_fetcher("https://cdn.example/generated.png", 9)
+        finally:
+            kele_module.httpx.get = original_get
+
+        self.assertEqual(result, b"\x89PNG\r\n\x1a\nurl-image")
+        self.assertEqual(captured["url"], "https://cdn.example/generated.png")
+        self.assertEqual(captured["kwargs"]["timeout"], 9)
+        headers = captured["kwargs"]["headers"]
+        self.assertIn("image/", headers["Accept"])
+        self.assertIn("Mozilla", headers["User-Agent"])
+
+    def test_url_download_http_errors_are_reported_as_result_download_failures(self):
+        original_get = kele_module.httpx.get
+
+        class FakeResponse:
+            content = b"error code: 1010"
+            headers = {"content-type": "text/html"}
+            status_code = 403
+
+            def raise_for_status(self) -> None:
+                request = httpx.Request("GET", "https://cdn.example/generated.png")
+                response = httpx.Response(self.status_code, request=request, content=self.content, headers=self.headers)
+                raise httpx.HTTPStatusError("Forbidden", request=request, response=response)
+
+        def fake_get(_url: str, **_kwargs: object) -> FakeResponse:
+            return FakeResponse()
+
+        kele_module.httpx.get = fake_get
+        try:
+            with self.assertRaisesRegex(RuntimeError, "KELE_RESULT_DOWNLOAD_HTTP_403"):
+                kele_module._default_url_fetcher("https://cdn.example/generated.png", 9)
+        finally:
+            kele_module.httpx.get = original_get
+
+    def test_url_download_rejects_non_image_success_responses(self):
+        original_get = kele_module.httpx.get
+
+        class FakeResponse:
+            content = b"<html>blocked</html>"
+            headers = {"content-type": "text/html"}
+            status_code = 200
+
+            def raise_for_status(self) -> None:
+                return None
+
+        def fake_get(_url: str, **_kwargs: object) -> FakeResponse:
+            return FakeResponse()
+
+        kele_module.httpx.get = fake_get
+        try:
+            with self.assertRaisesRegex(RuntimeError, "KELE_RESULT_DOWNLOAD_NOT_IMAGE"):
+                kele_module._default_url_fetcher("https://cdn.example/generated.png", 9)
+        finally:
+            kele_module.httpx.get = original_get
+
     def test_retries_retryable_kele_http_errors(self):
         expected_png = b"\x89PNG\r\n\x1a\nretried-kele-image"
         images = FakeImages(
@@ -170,6 +247,34 @@ class KeleProviderTests(unittest.TestCase):
             source.write_bytes(b"uploaded-product-image")
             with self.assertRaisesRegex(RuntimeError, "KELE_TIMEOUT"):
                 provider.edit_image(prompt="generate product main image", size="1024x1024", image_paths=[source])
+
+    def test_retries_cloudflare_524_with_provider_retry_after(self):
+        class CloudflareTimeoutError(Exception):
+            status_code = 524
+
+            def __str__(self) -> str:
+                return "Error code: 524 - {'retryable': True, 'retry_after': 120}"
+
+        expected_png = b"\x89PNG\r\n\x1a\nretried-cloudflare-timeout"
+        images = FakeImages(
+            SimpleNamespace(data=[SimpleNamespace(b64_json=b64encode(expected_png).decode("ascii"))]),
+            failures=[CloudflareTimeoutError()],
+        )
+        sleeps: list[float] = []
+        provider = KeleGptImage2Provider(
+            KeleConfig(base_url="https://code28.ccwu.cc/v1", api_key="test-key", model="gpt-image-2"),
+            client_factory=lambda **_kwargs: FakeOpenAIClient(images),
+            retry_sleep=sleeps.append,
+        )
+
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "product.png"
+            source.write_bytes(b"uploaded-product-image")
+            result = provider.edit_image(prompt="generate product main image", size="1024x1024", image_paths=[source])
+
+        self.assertEqual(result, expected_png)
+        self.assertEqual(len(images.edit_calls), 2)
+        self.assertEqual(sleeps, [120])
 
 
 if __name__ == "__main__":

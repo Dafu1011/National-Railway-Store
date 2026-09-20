@@ -4,11 +4,12 @@ from base64 import b64decode
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 import socket
 import time
 from typing import Any, Callable
-from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
+
+import httpx
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,15 @@ class KeleConfig:
 ClientFactory = Callable[..., Any]
 UrlFetcher = Callable[[str, int], bytes]
 RetrySleep = Callable[[float], None]
+
+RESULT_IMAGE_DOWNLOAD_HEADERS = {
+    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+}
 
 
 class KeleGptImage2Provider:
@@ -56,7 +66,7 @@ class KeleGptImage2Provider:
                 error = _normalize_provider_exception(exc)
                 if attempt >= self._max_attempts or not _is_retryable_provider_error(str(error)):
                     raise error from exc
-                self._retry_sleep(self._retry_base_delay_seconds * (2 ** (attempt - 1)))
+                self._retry_sleep(_retry_delay_seconds(error, self._retry_base_delay_seconds, attempt, exc))
         raise RuntimeError("KELE_RETRY_EXHAUSTED")
 
     def _create_image(self, *, prompt: str, size: str, image_paths: list[Any]) -> Any:
@@ -126,8 +136,33 @@ def _default_client_factory(**kwargs: Any) -> Any:
 
 
 def _default_url_fetcher(url: str, timeout: int) -> bytes:
-    with urlopen(url, timeout=timeout) as remote:
-        return remote.read()
+    try:
+        response = httpx.get(
+            url,
+            timeout=timeout,
+            follow_redirects=True,
+            headers=RESULT_IMAGE_DOWNLOAD_HEADERS,
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        detail = _response_body_snippet(exc.response)
+        raise RuntimeError(f"KELE_RESULT_DOWNLOAD_HTTP_{status_code}: {detail}") from exc
+    except httpx.TimeoutException as exc:
+        raise RuntimeError(f"KELE_RESULT_DOWNLOAD_TIMEOUT: {exc}") from exc
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"KELE_RESULT_DOWNLOAD_NETWORK_ERROR: {exc}") from exc
+
+    content = response.content
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if not content:
+        raise RuntimeError("KELE_RESULT_DOWNLOAD_EMPTY")
+    if content_type and not content_type.startswith("image/") and not _looks_like_image(content):
+        detail = _response_body_snippet(response)
+        raise RuntimeError(
+            f"KELE_RESULT_DOWNLOAD_NOT_IMAGE: status={response.status_code} content_type={content_type} body={detail}"
+        )
+    return content
 
 
 def _is_retryable_provider_error(message: str) -> bool:
@@ -137,9 +172,50 @@ def _is_retryable_provider_error(message: str) -> bool:
         or message.startswith("KELE_HTTP_502")
         or message.startswith("KELE_HTTP_503")
         or message.startswith("KELE_HTTP_504")
+        or message.startswith("KELE_HTTP_524")
         or message.startswith("KELE_NETWORK_ERROR")
         or message.startswith("KELE_TIMEOUT")
+        or message.startswith("KELE_RESULT_DOWNLOAD_HTTP_429")
+        or message.startswith("KELE_RESULT_DOWNLOAD_HTTP_500")
+        or message.startswith("KELE_RESULT_DOWNLOAD_HTTP_502")
+        or message.startswith("KELE_RESULT_DOWNLOAD_HTTP_503")
+        or message.startswith("KELE_RESULT_DOWNLOAD_HTTP_504")
+        or message.startswith("KELE_RESULT_DOWNLOAD_HTTP_524")
+        or message.startswith("KELE_RESULT_DOWNLOAD_NETWORK_ERROR")
+        or message.startswith("KELE_RESULT_DOWNLOAD_TIMEOUT")
     )
+
+
+def _retry_delay_seconds(error: RuntimeError, base_delay_seconds: float, attempt: int, source_exc: Exception) -> float:
+    exponential_delay = base_delay_seconds * (2 ** (attempt - 1))
+    retry_after = _provider_retry_after_seconds(str(error))
+    if retry_after is None:
+        retry_after = _response_retry_after_seconds(getattr(source_exc, "response", None))
+    if retry_after is None:
+        return exponential_delay
+    return max(exponential_delay, retry_after)
+
+
+def _provider_retry_after_seconds(message: str) -> float | None:
+    match = re.search(r"['\"]retry_after['\"]\s*:\s*([0-9]+(?:\.[0-9]+)?)", message)
+    if match is None:
+        return None
+    return float(match.group(1))
+
+
+def _response_retry_after_seconds(response: Any) -> float | None:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    retry_after = None
+    if hasattr(headers, "get"):
+        retry_after = headers.get("retry-after") or headers.get("Retry-After")
+    if retry_after is None:
+        return None
+    try:
+        return float(retry_after)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_provider_exception(exc: Exception) -> RuntimeError:
@@ -148,13 +224,38 @@ def _normalize_provider_exception(exc: Exception) -> RuntimeError:
     status_code = getattr(exc, "status_code", None)
     if isinstance(status_code, int):
         return RuntimeError(f"KELE_HTTP_{status_code}: {exc}")
-    if isinstance(exc, HTTPError):
-        detail = exc.read().decode("utf-8", errors="replace")
-        return RuntimeError(f"KELE_HTTP_{exc.code}: {detail}")
-    if isinstance(exc, URLError):
-        return RuntimeError(f"KELE_NETWORK_ERROR: {exc.reason}")
+    if isinstance(exc, httpx.HTTPStatusError):
+        return RuntimeError(f"KELE_RESULT_DOWNLOAD_HTTP_{exc.response.status_code}: {_response_body_snippet(exc.response)}")
+    if isinstance(exc, httpx.TimeoutException):
+        return RuntimeError(f"KELE_RESULT_DOWNLOAD_TIMEOUT: {exc}")
+    if isinstance(exc, httpx.RequestError):
+        return RuntimeError(f"KELE_RESULT_DOWNLOAD_NETWORK_ERROR: {exc}")
     if isinstance(exc, (TimeoutError, socket.timeout)):
         return RuntimeError(f"KELE_TIMEOUT: {exc}")
     if isinstance(exc, RuntimeError):
         return exc
     return RuntimeError(f"KELE_ERROR: {exc}")
+
+
+def _looks_like_image(content: bytes) -> bool:
+    return (
+        content.startswith(b"\x89PNG\r\n\x1a\n")
+        or content.startswith(b"\xff\xd8\xff")
+        or content.startswith(b"GIF87a")
+        or content.startswith(b"GIF89a")
+        or content.startswith(b"RIFF") and content[8:12] == b"WEBP"
+        or content.startswith(b"BM")
+        or content.startswith(b"II*\x00")
+        or content.startswith(b"MM\x00*")
+    )
+
+
+def _response_body_snippet(response: httpx.Response, limit: int = 200) -> str:
+    text_value = getattr(response, "text", None)
+    if isinstance(text_value, str):
+        text = text_value
+    else:
+        content = getattr(response, "content", b"")
+        text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else ""
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit] or f"status={response.status_code}"

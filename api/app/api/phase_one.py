@@ -21,6 +21,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from app.providers.mock_image import MockImageProvider
 from app.providers.kele import KeleConfig, KeleGptImage2Provider
 from app.providers.real_image import OUTPUT_SPECS, KeleFiveImagePipeline
+from app.quality.certificate_scale import inspect_certificate_scale
 from app.rendering.barcode.validators import BarcodeType, validate_barcode_value
 from app.storage import AppStorage, json_dumps, json_loads, new_id, row_to_dict
 from app.core.billing import (
@@ -679,7 +680,7 @@ async def complete_upload(
         raise_error(status.HTTP_409_CONFLICT, "UPLOAD_NOT_FINISHED", "鏂囦欢灏氭湭涓婁紶瀹屾垚銆?")
 
     product_id = payload.product_id
-    if upload["asset_type"].startswith("product_"):
+    if upload["asset_type"].startswith("product_") or upload["asset_type"] == "logo":
         if not product_id:
             raise_error(HTTP_422, "PRODUCT_ID_REQUIRED", "鍟嗗搧绱犳潗蹇呴』缁戝畾鍟嗗搧銆?")
         if get_owned_row(storage, "products", product_id, user["id"]) is None:
@@ -1248,18 +1249,13 @@ def execute_claimed_generation_job(*, job_id: str, storage: AppStorage, runtime_
         return True
 
     with storage.connect() as connection:
-        connection.execute(
-            """
-            UPDATE generation_jobs
-            SET status = 'completed',
-                completed_at = CURRENT_TIMESTAMP,
-                error_code = NULL,
-                error_message = NULL
-            WHERE id = ? AND user_id = ?
-            """,
-            (job_id, user["id"]),
-        )
+        failed_quality_messages: list[str] = []
         for image in generated:
+            quality_status, quality_code, quality_message = generated_output_quality_status(
+                image.output_type,
+                image.path,
+                product_for_image,
+            )
             insert_generation_output(
                 connection,
                 user_id=user["id"],
@@ -1270,8 +1266,38 @@ def execute_claimed_generation_job(*, job_id: str, storage: AppStorage, runtime_
                 height=image.height,
                 file_path=image.path,
                 source_asset_version_id=source_asset["version_id"],
+                quality_status=quality_status,
             )
-        connection.execute("UPDATE projects SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (project["id"],))
+            if quality_status != "passed":
+                failed_quality_messages.append(
+                    f"{image.output_type}: {quality_code or 'QUALITY_FAILED'} {quality_message or ''}".strip()
+                )
+        if failed_quality_messages:
+            connection.execute(
+                """
+                UPDATE generation_jobs
+                SET status = 'failed',
+                    completed_at = CURRENT_TIMESTAMP,
+                    error_code = ?,
+                    error_message = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                ("OUTPUT_QUALITY_FAILED", _clip_error_message("; ".join(failed_quality_messages)), job_id, user["id"]),
+            )
+            connection.execute("UPDATE projects SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (project["id"],))
+        else:
+            connection.execute(
+                """
+                UPDATE generation_jobs
+                SET status = 'completed',
+                    completed_at = CURRENT_TIMESTAMP,
+                    error_code = NULL,
+                    error_message = NULL
+                WHERE id = ? AND user_id = ?
+                """,
+                (job_id, user["id"]),
+            )
+            connection.execute("UPDATE projects SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (project["id"],))
         output_count = int(
             connection.execute(
                 "SELECT COUNT(*) AS count FROM generation_outputs WHERE job_id = ? AND user_id = ?",
@@ -1279,10 +1305,16 @@ def execute_claimed_generation_job(*, job_id: str, storage: AppStorage, runtime_
             ).fetchone()["count"]
         )
 
-    if output_count >= len(OUTPUT_SPECS):
+    job_payload = get_job_payload(storage, job_id, user["id"])
+    if job_payload["status"] == "completed" and output_count >= len(OUTPUT_SPECS):
         charge_generation_hold(storage, user_id=user["id"], job_id=job_id)
     else:
-        release_generation_hold(storage, user_id=user["id"], job_id=job_id, remark="Generation produced too few outputs; reserved points released.")
+        release_generation_hold(
+            storage,
+            user_id=user["id"],
+            job_id=job_id,
+            remark="Generation failed quality gates or produced too few outputs; reserved points released.",
+        )
 
     runtime_services.delete_cache(gallery_cache_key(user["id"]))
     return True
@@ -1443,18 +1475,13 @@ def run_generation_job(
         raise_error(status.HTTP_502_BAD_GATEWAY, "IMAGE_PROVIDER_FAILED", message)
 
     with storage.connect() as connection:
-        connection.execute(
-            """
-            UPDATE generation_jobs
-            SET status = 'completed',
-                completed_at = CURRENT_TIMESTAMP,
-                error_code = NULL,
-                error_message = NULL
-            WHERE id = ? AND user_id = ?
-            """,
-            (job_id, user["id"]),
-        )
+        failed_quality_messages: list[str] = []
         for image in generated:
+            quality_status, quality_code, quality_message = generated_output_quality_status(
+                image.output_type,
+                image.path,
+                product_for_image,
+            )
             insert_generation_output(
                 connection,
                 user_id=user["id"],
@@ -1465,8 +1492,38 @@ def run_generation_job(
                 height=image.height,
                 file_path=image.path,
                 source_asset_version_id=source_asset["version_id"],
+                quality_status=quality_status,
             )
-        connection.execute("UPDATE projects SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (project_id,))
+            if quality_status != "passed":
+                failed_quality_messages.append(
+                    f"{image.output_type}: {quality_code or 'QUALITY_FAILED'} {quality_message or ''}".strip()
+                )
+        if failed_quality_messages:
+            connection.execute(
+                """
+                UPDATE generation_jobs
+                SET status = 'failed',
+                    completed_at = CURRENT_TIMESTAMP,
+                    error_code = ?,
+                    error_message = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                ("OUTPUT_QUALITY_FAILED", _clip_error_message("; ".join(failed_quality_messages)), job_id, user["id"]),
+            )
+            connection.execute("UPDATE projects SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (project_id,))
+        else:
+            connection.execute(
+                """
+                UPDATE generation_jobs
+                SET status = 'completed',
+                    completed_at = CURRENT_TIMESTAMP,
+                    error_code = NULL,
+                    error_message = NULL
+                WHERE id = ? AND user_id = ?
+                """,
+                (job_id, user["id"]),
+            )
+            connection.execute("UPDATE projects SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (project_id,))
         output_count = int(
             connection.execute(
                 "SELECT COUNT(*) AS count FROM generation_outputs WHERE job_id = ? AND user_id = ?",
@@ -1474,13 +1531,19 @@ def run_generation_job(
             ).fetchone()["count"]
         )
 
-    if output_count >= len(OUTPUT_SPECS):
+    job_payload = get_job_payload(storage, job_id, user["id"])
+    if job_payload["status"] == "completed" and output_count >= len(OUTPUT_SPECS):
         charge_generation_hold(storage, user_id=user["id"], job_id=job_id)
     else:
-        release_generation_hold(storage, user_id=user["id"], job_id=job_id, remark="鐢熸垚缁撴灉涓嶈冻5寮狅紝閲婃斁棰勫崰鐐规暟")
+        release_generation_hold(
+            storage,
+            user_id=user["id"],
+            job_id=job_id,
+            remark="Generation failed quality gates or produced too few outputs; reserved points released.",
+        )
 
     runtime_services.delete_cache(gallery_cache_key(user["id"]))
-    return get_job_payload(storage, job_id, user["id"])
+    return job_payload
 
 
 def mark_generation_job_failed(
@@ -1588,6 +1651,7 @@ def get_latest_reference_image_paths(storage: AppStorage, product_id: str, user_
     for output_type, asset_type in {
         "certificate": "certificate_reference",
         "package": "package_reference",
+        "logo": "logo",
     }.items():
         asset = get_latest_product_asset(storage, product_id, user_id, asset_type)
         if asset and asset.get("file_path"):
@@ -1830,6 +1894,19 @@ def recover_existing_project_outputs(storage: AppStorage, *, project_id: str, us
             )
 
 
+def generated_output_quality_status(output_type: str, file_path: Path, product: dict[str, Any]) -> tuple[str, str | None, str | None]:
+    if output_type != "certificate":
+        return "passed", None, None
+    try:
+        with Image.open(file_path) as image:
+            result = inspect_certificate_scale(image, product)
+    except (OSError, UnidentifiedImageError) as exc:
+        return "failed", "OUTPUT_IMAGE_UNREADABLE", str(exc)
+    if result.passed:
+        return "passed", None, None
+    return "failed", result.code, result.message
+
+
 def insert_generation_output(
     connection: Any,
     *,
@@ -1841,6 +1918,7 @@ def insert_generation_output(
     height: int,
     file_path: Path,
     source_asset_version_id: str,
+    quality_status: str = "passed",
 ) -> None:
     existing = connection.execute(
         "SELECT id FROM generation_outputs WHERE job_id = ? AND user_id = ? AND output_type = ?",
@@ -1854,7 +1932,7 @@ def insert_generation_output(
         INSERT INTO generation_outputs
             (id, user_id, project_id, job_id, output_type, width, height, format,
              file_path, quality_status, source_asset_version_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'png', ?, 'passed', ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'png', ?, ?, ?)
         """,
         (
             new_id(),
@@ -1865,6 +1943,7 @@ def insert_generation_output(
             width,
             height,
             str(file_path),
+            quality_status,
             source_asset_version_id,
         ),
     )

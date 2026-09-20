@@ -28,6 +28,14 @@ export function userFacingErrorMessage(error: unknown, context: ErrorDisplayCont
   if (upperCode.includes("QUALITY_REVIEW_REQUIRED") || upperRaw.includes("QUALITY_REVIEW_REQUIRED")) {
     return "图片尚未通过质检，暂时不能下载。";
   }
+  if (
+    upperCode.includes("OUTPUT_QUALITY_FAILED") ||
+    upperRaw.includes("OUTPUT_QUALITY_FAILED") ||
+    upperRaw.includes("CERTIFICATE_CARD_TOO_LARGE") ||
+    upperRaw.includes("CERTIFICATE_CARD_NOT_DETECTED")
+  ) {
+    return "图片未通过质检，请调整素材或重新生成。";
+  }
   if (upperCode.includes("RESOURCE_ACCESS_DENIED") || upperRaw.includes("RESOURCE_ACCESS_DENIED")) {
     return "资源不存在或当前账号无权访问。";
   }

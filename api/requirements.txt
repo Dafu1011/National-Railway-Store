@@ -9,3 +9,4 @@ celery>=5.4
 
 pillow>=10.3
 openai>=1.99
+httpx>=0.28

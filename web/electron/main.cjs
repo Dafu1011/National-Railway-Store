@@ -5,6 +5,7 @@ const http = require("node:http");
 const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 const { Readable, Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 
@@ -286,6 +287,7 @@ if (require.main === module) {
 module.exports = {
   buildUpdateDownloadUrl,
   buildProxyTarget,
+  createUpdateInstallHandler,
   createRendererServer,
   downloadUpdateInstaller,
   isSafeExternalUrl,
@@ -308,15 +310,38 @@ function isSafeExternalUrl(rawUrl) {
 
 function registerUpdateIpc({ app, ipcMain }) {
   ipcMain.handle("updates:get-app-version", () => app.getVersion());
-  ipcMain.handle("updates:install", async (event, update) => {
+  ipcMain.handle("updates:install", createUpdateInstallHandler({ appModule: app }));
+}
+
+function createUpdateInstallHandler({
+  appModule,
+  apiBaseUrl = process.env.ZHIFENG_API_BASE_URL,
+  fetchImpl = globalThis.fetch,
+  launchInstallerImpl = launchInstaller,
+  scheduleQuit = quitAppAfterIpcReply,
+}) {
+  return async (event, update) => {
     const installerPath = await downloadUpdateInstaller(update, {
-      appModule: app,
+      apiBaseUrl,
+      appModule,
+      fetchImpl,
       onProgress: (progress) => event.sender.send("updates:download-progress", progress),
     });
-    launchInstaller(installerPath);
-    app.quit();
+    await launchInstallerImpl(installerPath);
+    scheduleQuitAfterIpcReply(appModule, scheduleQuit);
     return { installer_path: installerPath, launched: true };
-  });
+  };
+}
+
+function scheduleQuitAfterIpcReply(appModule, scheduleQuit = quitAppAfterIpcReply) {
+  const timeout = setTimeout(() => scheduleQuit(appModule), 750);
+  if (typeof timeout.unref === "function") {
+    timeout.unref();
+  }
+}
+
+function quitAppAfterIpcReply(appModule) {
+  appModule.quit();
 }
 
 function buildUpdateDownloadUrl(downloadUrl, apiBaseUrl = process.env.ZHIFENG_API_BASE_URL) {
@@ -470,7 +495,23 @@ function sanitizeFileNamePart(value) {
   return String(value || "release").replace(/[^a-zA-Z0-9._-]/g, "-");
 }
 
-function launchInstaller(installerPath, spawnImpl = spawn) {
+async function launchInstaller(installerPath, spawnImpl = spawn, platform = process.platform, shellImpl) {
+  if (platform === "win32") {
+    const electronShell = shellImpl || require("electron").shell;
+    const launchError = await electronShell.openPath(installerPath);
+    if (!launchError) {
+      return;
+    }
+    if (typeof electronShell.openExternal === "function") {
+      const externalError = await electronShell.openExternal(pathToFileURL(installerPath).toString());
+      if (!externalError) {
+        return;
+      }
+      throw new Error(`Failed to launch update installer: ${launchError}; ${externalError}`);
+    }
+    throw new Error(`Failed to launch update installer: ${launchError}`);
+  }
+
   const child = spawnImpl(installerPath, [], {
     detached: true,
     stdio: "ignore",

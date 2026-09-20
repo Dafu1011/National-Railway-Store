@@ -65,6 +65,156 @@ class RealImagePipelinePromptTests(unittest.TestCase):
             with self.subTest(prompt=prompt):
                 self.assertNotIn("brand: ??", prompt)
                 self.assertIn("Do not repeat the brand name", prompt)
+
+    def test_prompt_lengths_stay_bounded_after_certificate_simplification(self):
+        product = {
+            "name": "手推式扫雪机",
+            "brand": "星锐月恒",
+            "model": "6.5马力",
+            "category": "大型清洁机械",
+        }
+        project = {
+            "barcode_type": "EAN_13",
+            "barcode_value": "6979051758366",
+            "has_certificate_reference": True,
+            "has_package_reference": True,
+            "certificate_config": {
+                "production_date": "2026-09-01",
+                "inspector": "QC-01",
+                "manufacturer_name": "吉林省军达铁洛机械车辆配件有限公司",
+                "manufacturer_address": "吉林省长春市二道区经纬南路7094号",
+            },
+            "package_config": {
+                "manufacturer_name": "吉林省军达铁洛机械车辆配件有限公司",
+                "manufacturer_address": "吉林省长春市二道区经纬南路7094号",
+            },
+        }
+
+        self.assertLessEqual(len(_prompt_for("certificate", product, project)), 6500)
+        self.assertLessEqual(len(_prompt_for("package", product, project)), 24000)
+        for prompt in _detail_module_prompts(product):
+            self.assertLessEqual(len(prompt), 5000)
+
+    def test_large_product_certificate_prompt_stays_compact_for_timeout_stability(self):
+        product = {
+            "name": "手推式扫车机",
+            "brand": "星锐月恒",
+            "model": "6.5马力",
+            "category": "大型清洁机械",
+        }
+        project = {
+            "barcode_type": "EAN_13",
+            "barcode_value": "6979051758366",
+            "has_certificate_reference": True,
+            "certificate_config": {
+                "production_date": "2026-09-02",
+                "inspector": "QC-01",
+                "manufacturer_name": "吉林省军达铁洛机械车辆配件有限公司",
+                "manufacturer_address": "吉林省长春市二道区经纬南路7094号",
+            },
+        }
+
+        prompt = _prompt_for("certificate", product, project)
+
+        self.assertLessEqual(len(prompt), 5000)
+        self.assertIn("certificate about half the previous foreground visual size", prompt)
+        self.assertIn("show about one third of the large product", prompt)
+        self.assertIn("place the certificate on top of the large product", prompt)
+        self.assertIn("The certificate reference image is the highest-priority certificate-card style reference", prompt)
+        self.assertNotIn("50 to 55 degrees", prompt)
+
+    def test_certificate_prompt_uses_cropped_feature_composition_for_large_products(self):
+        prompt = _prompt_for(
+            "certificate",
+            {
+                "name": "手推式扫雪机",
+                "brand": "星锐月恒",
+                "model": "6.5马力",
+                "category": "大型清洁机械",
+            },
+            {"barcode_type": "EAN_13", "barcode_value": "6979051758366"},
+        )
+
+        self.assertIn("Large-product certificate composition is active", prompt)
+        self.assertIn("must show a cropped close partial view", prompt)
+        self.assertIn("Do not show the full product", prompt)
+        self.assertNotIn("Small products should remain fully visible when possible", prompt)
+
+    def test_certificate_prompt_starts_with_hard_large_product_mode_for_vehicle_like_names(self):
+        prompt = _prompt_for(
+            "certificate",
+            {
+                "name": "手推式扫车机",
+                "brand": "星锐月恒",
+                "model": "6.5马力",
+                "category": "",
+            },
+            {"barcode_type": "EAN_13", "barcode_value": "6979051758366"},
+        )
+
+        self.assertTrue(prompt.startswith("HARD LARGE-PRODUCT CERTIFICATE MODE"))
+        self.assertIn("大型商品模式已启用", prompt)
+        self.assertIn("不要全车或整机完整入镜", prompt)
+        self.assertIn("必须裁切商品", prompt)
+        self.assertIn("只展示局部特征", prompt)
+
+    def test_certificate_prompt_treats_vehicle_names_as_large_products(self):
+        for name in ("车", "四轮扫雪车", "四轮推雪车", "雪铲车", "沙滩车", "ATV", "全地形车", "四轮车"):
+            with self.subTest(name=name):
+                prompt = _prompt_for(
+                    "certificate",
+                    {
+                        "name": name,
+                        "brand": "中力",
+                        "model": "ZL-F7",
+                        "category": "",
+                    },
+                    {"barcode_type": "EAN_13", "barcode_value": "6903244675147"},
+                )
+
+                self.assertTrue(prompt.startswith("HARD LARGE-PRODUCT CERTIFICATE MODE"))
+                self.assertIn("Large-product certificate composition is active", prompt)
+                self.assertIn("show about one third of the large product", prompt)
+                self.assertNotIn("Small-product certificate composition is active", prompt)
+
+    def test_large_product_certificate_prompt_scales_card_onto_product_surface(self):
+        prompt = _prompt_for(
+            "certificate",
+            {
+                "name": "手推式扫车机",
+                "brand": "星锐月恒",
+                "model": "6.5马力",
+                "category": "大型清洁机械",
+            },
+            {
+                "barcode_type": "EAN_13",
+                "barcode_value": "6979051758366",
+                "has_certificate_reference": True,
+            },
+        )
+
+        self.assertIn("certificate about half the previous foreground visual size", prompt)
+        self.assertIn("place the certificate on top of the large product", prompt)
+        self.assertIn("show about one third of the large product", prompt)
+        self.assertIn("camera about 0.5 meters from the product, 1.7 meters high, tilted downward about 30 degrees", prompt)
+        self.assertIn("The certificate reference image is the highest-priority certificate-card style reference", prompt)
+
+    def test_certificate_prompt_keeps_full_visibility_for_small_products(self):
+        prompt = _prompt_for(
+            "certificate",
+            {
+                "name": "电饭锅",
+                "brand": "智枫",
+                "model": "4L",
+                "category": "厨房小家电",
+            },
+            {"barcode_type": "EAN_13", "barcode_value": "6979051758366"},
+        )
+
+        self.assertIn("Small-product certificate composition is active", prompt)
+        self.assertIn("Small products should remain fully visible when possible", prompt)
+        self.assertNotIn("must show a cropped close partial view", prompt)
+
     def test_non_detail_outputs_request_real_photography_not_rendered_art(self):
         product = {
             "name": "impact wrench",
@@ -101,30 +251,32 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         package_prompt = _prompt_for("package", product, project)
         scene_prompt = _prompt_for("scene", product)
 
-        self.assertIn("800x800, 1:1 square", certificate_prompt)
-        self.assertIn("pure seamless #ffffff white background", certificate_prompt)
-        self.assertIn("pure white matte support surface", certificate_prompt)
-        self.assertIn("large pure white negative space across the lower half", certificate_prompt)
+        self.assertIn("1024x1024, 1:1 square", certificate_prompt)
+        self.assertIn("pure white background", certificate_prompt)
+        self.assertIn("no tabletop contact shadow", certificate_prompt)
+        self.assertIn("Small products should remain fully visible", certificate_prompt)
+        self.assertIn("Small-product certificate composition is active", certificate_prompt)
         self.assertIn("50 to 55 degrees", certificate_prompt)
         self.assertIn("28 to 35 mm phone wide-angle", certificate_prompt)
-        self.assertIn("horizontal tabletop plane", certificate_prompt)
-        self.assertIn("visual center around 68% to 72% of image width and 32% to 38% of image height", certificate_prompt)
-        self.assertIn("reference-like lower-left placement", certificate_prompt)
-        self.assertIn("not a perfectly front-facing rectangle", certificate_prompt)
-        self.assertIn("directly generate both the product and the certificate in one natural photo", certificate_prompt)
+        self.assertIn("horizontal plane", certificate_prompt)
+        self.assertIn("certificate position is flexible", certificate_prompt)
+        self.assertIn("readability has priority over making the certificate tiny", certificate_prompt)
+        self.assertIn("readable physical product certificate", certificate_prompt)
+        self.assertIn("Directly generate both the product and the certificate in one natural photo", certificate_prompt)
         self.assertIn("no props, no desk accessories, no plants", certificate_prompt)
-        self.assertIn("only the referenced product", certificate_prompt)
+        self.assertIn("only product reference", certificate_prompt)
         self.assertNotIn("blank paper certificate card", certificate_prompt)
         self.assertNotIn("backend composited flat card", certificate_prompt)
-        self.assertIn("a very light natural contact shadow is allowed", certificate_prompt)
-        self.assertIn("product shape fidelity is more important than shadow removal", certificate_prompt)
-        self.assertNotIn("subtle contact shadows", certificate_prompt)
+        self.assertNotIn("Hard acceptance gate: for bulky products", certificate_prompt)
+        self.assertNotIn("no more than 28%", certificate_prompt)
+        self.assertNotIn("contact shadow is allowed", certificate_prompt)
         self.assertNotIn("straight-on", certificate_prompt)
         self.assertIn("Do not default to a tall narrow bottle package", package_prompt)
         self.assertIn("side information zone reasonably visible to the camera", package_prompt)
         self.assertIn("right-side tabletop when physically possible", package_prompt)
         self.assertIn("pure white background", package_prompt)
-        self.assertIn("designed retail packaging, not an oversized shipping package", package_prompt)
+        self.assertIn("designed retail packaging", package_prompt)
+        self.assertNotIn("not an oversized shipping package", package_prompt)
         self.assertIn("no unnecessary artificial printed border", package_prompt)
         self.assertIn("unless that border style comes from the package reference", package_prompt)
         self.assertIn("side face should stay visually simple", package_prompt)
@@ -164,19 +316,17 @@ class RealImagePipelinePromptTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("pure seamless #ffffff white background", prompt)
-        self.assertIn("pure white matte support surface", prompt)
-        self.assertIn("a very light natural contact shadow is allowed", prompt)
-        self.assertIn("product shape fidelity is more important than shadow removal", prompt)
-        self.assertIn("clean natural product edges are more important than aggressively removing all shadows", prompt)
-        self.assertIn("keep a pure-white background while allowing one realistic soft contact shadow", prompt)
+        self.assertIn("pure white background", prompt)
+        self.assertIn("no tabletop contact shadow", prompt)
+        self.assertIn("clean product edges", prompt)
+        self.assertIn("do not add floor shadows", prompt)
         self.assertNotIn("prefer a pure-white no-shadow result", prompt)
         self.assertIn("no horizon line", prompt)
         self.assertIn("50 to 55 degrees", prompt)
-        self.assertIn("directly generate both the product and the certificate in one natural photo", prompt)
-        self.assertIn("The certificate must be generated by the image model as part of the same camera shot", prompt)
+        self.assertIn("Directly generate both the product and the certificate in one natural photo", prompt)
+        self.assertIn("The certificate, its printed rows, its barcode, and its quality inspection stamp must be generated by the image model as part of the same camera shot", prompt)
         self.assertIn("no props, no desk accessories, no plants", prompt)
-        self.assertIn("only the referenced product", prompt)
+        self.assertIn("only product reference", prompt)
 
     def test_certificate_prompt_matches_reference_phone_snapshot_composition(self):
         prompt = _prompt_for(
@@ -191,24 +341,25 @@ class RealImagePipelinePromptTests(unittest.TestCase):
 
         self.assertIn("phone-style angled top-down snapshot", prompt)
         self.assertIn("camera above and slightly in front-left", prompt)
-        self.assertIn("Place the uploaded product in the upper-right area", prompt)
-        self.assertIn("visual center around 68% to 72% of image width and 32% to 38% of image height", prompt)
-        self.assertIn("no product deformation, no warping, no squeezing, no stretching", prompt)
-        self.assertIn("cylindrical products must keep straight parallel sides", prompt)
-        self.assertIn("do not turn a tall cylinder into a tapered or swollen shape", prompt)
-        self.assertIn("preserve the exact original product silhouette", prompt)
-        self.assertIn("no jagged stair-step edges, no pixelated cutout edge, no serrated contour", prompt)
-        self.assertIn("do not smooth, redraw, stylize, or reinterpret the product body", prompt)
-        self.assertIn("use the uploaded image geometry as a locked reference", prompt)
-        self.assertIn("no product edge, corner, rim, lip, seam, or silhouette detail may be covered", prompt)
-        self.assertIn("the complete outer boundary must remain visible", prompt)
-        self.assertIn("The certificate is a single small horizontal rectangular white hard card", prompt)
-        self.assertIn("visual center should be around 31% to 35% of image width and 62% to 66% of image height", prompt)
-        self.assertIn("should sit reasonably close to the product base without touching it", prompt)
-        self.assertIn("must leave a clear white gap from the product and never slide underneath or cover the product", prompt)
-        self.assertIn("lower-left to upper-right diagonal relationship", prompt)
-        self.assertIn("do not overlap", prompt)
+        self.assertIn("Composition priority: readable certificate first", prompt)
+        self.assertIn("Small products should remain fully visible when possible", prompt)
+        self.assertIn("Small-product certificate composition is active", prompt)
+        self.assertIn("do not lock to the uploaded 2D silhouette", prompt)
+        self.assertIn("recognizable structure", prompt)
+        self.assertIn("readable physical product certificate", prompt)
+        self.assertIn("readability has priority over making the certificate tiny", prompt)
+        self.assertNotIn("must show a cropped close partial view", prompt)
+        self.assertNotIn("Do not shrink an entire bulky product into toy scale", prompt)
+        self.assertIn("The certificate position is flexible", prompt)
+        self.assertIn("stable product-surface area", prompt)
+        self.assertNotIn("use the uploaded image geometry as a locked reference", prompt)
+        self.assertNotIn("Hard acceptance gate: for bulky products", prompt)
+        self.assertNotIn("no more than 28%", prompt)
+        self.assertNotIn("never enlarge the certificate just to make every small row readable", prompt)
+        self.assertNotIn("should sit reasonably close to the product base without touching it", prompt)
+        self.assertNotIn("must leave a clear white gap from the product and never slide underneath or cover the product", prompt)
         self.assertNotIn("product stands upright", prompt)
+        self.assertNotIn("visual center should be around 31% to 35% of image width", prompt)
 
     def test_certificate_prompt_requires_adaptive_physical_product_orientation(self):
         prompt = _prompt_for(
@@ -223,8 +374,6 @@ class RealImagePipelinePromptTests(unittest.TestCase):
 
         self.assertIn("Choose the product's orientation from its real structure, center of gravity, and normal display logic", prompt)
         self.assertIn("do not mechanically force every product to stand upright", prompt)
-        self.assertIn("Drill bits, knife rods, screwdrivers, pen-shaped tools, long accessories, pipes", prompt)
-        self.assertIn("must lie flat or slightly diagonal rather than stand vertically against gravity", prompt)
         self.assertIn("no floating, no tipping, no impossible balance, no intersection", prompt)
 
     def test_certificate_prompt_is_detailed_enough_to_force_casual_phone_co_photo(self):
@@ -241,28 +390,21 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("only product reference", prompt)
         self.assertIn("真实自然的手机随手拍", prompt)
         self.assertIn("no wall, no window curtain, no visible table edge, no floor", prompt)
-        self.assertIn("white area should occupy most of the frame", prompt)
-        self.assertIn("lower half must keep a large clean pure-white negative-space area", prompt)
-        self.assertIn("do not add parts, accessories, packaging, labels, or quantities that are not visible in the uploaded image", prompt)
-        self.assertIn("single small horizontal rectangular white hard card", prompt)
-        self.assertIn("not tissue, not folded, not stacked, not diamond-patterned", prompt)
-        self.assertIn("clean sharply cut edges and corners", prompt)
-        self.assertIn("may show only very slight natural paper waviness or tiny surface wrinkles", prompt)
-        self.assertIn("no frayed, furry, torn, ragged, or fuzzy edges", prompt)
-        self.assertIn("long edge nearly horizontal with only a slight 3 to 5 degree rotation", prompt)
-        self.assertIn("not a vertical standing card, not a portrait paper sheet, not a floating overlay", prompt)
+        self.assertIn("pure white background", prompt)
+        self.assertIn("no tabletop contact shadow", prompt)
+        self.assertIn("not a floating overlay", prompt)
         self.assertIn("not a full top-down flat-lay and not a straight front view", prompt)
-        self.assertIn("ordinary indoor natural-light phone snapshot", prompt)
-        self.assertIn("The certificate face must be clear and readable", prompt)
-        self.assertIn("one small barcode using the entered barcode digits", prompt)
-        self.assertIn("barcode numerals must exactly match the entered barcode digits", prompt)
-        self.assertIn("first digit printed outside the barcode bars on the left", prompt)
-        self.assertIn("start guard, center guard before the eighth digit, and end guard bars must be the longest", prompt)
-        self.assertIn("thin and thick vertical bars with varied bar heights", prompt)
-        self.assertIn("no malformed barcode numerals, no random barcode digits", prompt)
-        self.assertIn("no garbled characters, no pseudo text", prompt)
+        self.assertIn("not commercial studio product advertising", prompt)
+        self.assertIn("readability has priority over making the certificate tiny", prompt)
+        self.assertIn("one barcode using the entered barcode type and digits", prompt)
+        self.assertIn("left start guard, center guard, and right end guard bars are longer", prompt)
+        self.assertIn("data bars vary in width and some height, not equal-height decorative stripes", prompt)
+        self.assertIn("first digit outside left and the remaining digits below as 6 left digits + 6 right digits", prompt)
+        self.assertIn("white quiet zones remain on both sides", prompt)
+        self.assertIn("Barcode numerals must exactly match the entered barcode digits", prompt)
+        self.assertIn("avoid garbled characters, pseudo text", prompt)
 
-    def test_certificate_prompt_leaves_inspector_area_for_backend_only(self):
+    def test_certificate_prompt_requests_model_generated_qc_stamp(self):
         prompt = _prompt_for(
             "certificate",
             {
@@ -280,13 +422,16 @@ class RealImagePipelinePromptTests(unittest.TestCase):
 
         self.assertNotIn("inspector: QC-01;", prompt)
         self.assertIn("Do not print the inspector parameter value as ordinary black text", prompt)
-        self.assertIn("do not show a normal 检验员：QC-01 row", prompt)
-        self.assertIn("The only allowed reserved area is the normal inspector-value area on the certificate", prompt)
-        self.assertIn("The backend will render the inspector value after image generation", prompt)
-        self.assertIn("keep the inspector-value area clean and blank", prompt)
-        self.assertIn("The inspector value area must stay safely above the barcode and must never touch the barcode", prompt)
-        for forbidden in ("QC stamp", "quality inspection stamp", "red stamp", "stamp mark", "质检章"):
-            self.assertNotIn(forbidden.lower(), prompt.lower())
+        self.assertIn("The 检验员 field label must remain visible on the certificate", prompt)
+        self.assertIn("the red quality inspection stamp is the inspector field value", prompt)
+        self.assertIn("Place the stamp in or near the inspector field value area", prompt)
+        self.assertIn("do not remove, hide, or omit the 检验员 label", prompt)
+        self.assertIn("Render exactly one red quality inspection stamp directly on the certificate", prompt)
+        self.assertIn("make the stamp about 1.3x the current visual stamp size", prompt)
+        self.assertIn("quality inspection stamp completely inside the certificate card boundary", prompt)
+        self.assertIn("not covering, touching, or overlapping the barcode", prompt)
+        self.assertNotIn("The backend will render the inspector value after image generation", prompt)
+        self.assertNotIn("keep the inspector-value area clean and blank", prompt)
 
     def test_certificate_prompt_isolates_backend_inspector_mark_from_product_without_banning_real_red_product_parts(self):
         prompt = _prompt_for(
@@ -305,8 +450,8 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         )
 
         self.assertIn("Product red elements are allowed only when they already exist in the uploaded product reference", prompt)
-        self.assertIn("do not transfer certificate inspector-area semantics onto the product", prompt)
-        self.assertIn("certificate-only inspector area must not appear on product switches", prompt)
+        self.assertIn("Do not transfer certificate inspector-stamp semantics onto the product", prompt)
+        self.assertIn("certificate-only inspector stamp must not appear on product switches", prompt)
         self.assertIn("Do not run any global red-color removal", prompt)
         self.assertNotIn("No red circular mark, red oval mark, red ring, red seal", prompt)
 
@@ -572,7 +717,7 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertLess(residue_red, 5)
         self.assertGreater(final_red, 20)
 
-    def test_certificate_prompt_lists_required_certificate_fields_and_smaller_qc_stamp(self):
+    def test_certificate_prompt_lists_required_readable_certificate_fields_and_qc_stamp(self):
         prompt = _prompt_for(
             "certificate",
             {"name": "厚抹生乳茶", "brand": "别样泡泡", "model": "500ml"},
@@ -588,9 +733,10 @@ class RealImagePipelinePromptTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("Required certificate rows: 品牌, 名称, 规格型号, 生产日期, 生产厂家, 厂址, 检验员 value area left blank for backend inspector rendering", prompt)
-        self.assertIn("barcode centered horizontally", prompt)
-        self.assertIn("backend-applied inspector mark remains half the previous visual size", prompt)
+        self.assertIn("Required certificate layout", prompt)
+        self.assertIn("one red quality inspection stamp based on QC-01", prompt)
+        self.assertIn("one barcode using the entered barcode type and digits", prompt)
+        self.assertIn("make the stamp about 1.3x the current visual stamp size", prompt)
         self.assertIn("manufacturer: 智枫生产厂家", prompt)
         self.assertIn("factory address: 吉林省长春市南关区幸福街888号", prompt)
 
@@ -607,14 +753,21 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         )
 
         self.assertIn("A certificate reference image is provided as an additional reference image", certificate_prompt)
-        self.assertIn("Use the certificate reference only for certificate card style", certificate_prompt)
+        self.assertIn("The certificate reference image is the highest-priority certificate-card style reference", certificate_prompt)
+        self.assertIn("If the reference certificate has a different border, card proportions, field spacing, stamp style, or barcode zone", certificate_prompt)
+        self.assertIn("keep those certificate design traits", certificate_prompt)
+        self.assertIn("replacing only the readable product data", certificate_prompt)
+        self.assertNotIn("Use the certificate reference only for certificate card style", certificate_prompt)
         self.assertIn("A package reference image is provided as an additional reference image", package_prompt)
         self.assertIn("Use the package reference only for packaging style", package_prompt)
-        self.assertIn("Package size must be chosen from the real product volume and the user-entered 规格型号/model value", package_prompt)
-        self.assertIn("the visible package must be taller than the nearby individual product's highest point", package_prompt)
-        self.assertIn("overall outer volume must be clearly larger than the product", package_prompt)
-        self.assertIn("make the package length and width about 1.3x larger than that current minimum-fit package size", package_prompt)
-        self.assertIn("do not stretch, squeeze, warp, or distort package text, logos, barcode, illustrations, or surface graphics", package_prompt)
+        self.assertIn("Package size rule: the box must be large", package_prompt)
+        self.assertIn("visibly able to contain the product in its realistic packed state", package_prompt)
+        self.assertIn("using folded, nested, detached, or storage volume when the product is large or long equipment", package_prompt)
+        self.assertNotIn("The package outer length, width, and height must each be at least 1.5x", package_prompt)
+        self.assertNotIn("This is a per-dimension rule, not only an overall volume rule", package_prompt)
+        self.assertIn("crop or reduce the visible product instead of shrinking the package", package_prompt)
+        self.assertNotIn("make the package length and width about 1.3x larger", package_prompt)
+        self.assertIn("re-layout package text, logos, barcode, illustrations, and graphics without stretching or warping", package_prompt)
 
     def test_package_reference_prompt_does_not_force_kraft_or_plain_carton_style(self):
         prompt = _prompt_for(
@@ -766,7 +919,84 @@ class RealImagePipelinePromptTests(unittest.TestCase):
 
         self.assertEqual(compose_calls, [])
         self.assertEqual(shadow_pixel, (222, 222, 220))
-        self.assertGreater(red_pixels, 40)
+        self.assertEqual(red_pixels, 0)
+
+    def test_optional_logo_is_sent_only_to_main_image_and_appended_to_prompt(self):
+        calls = []
+
+        class FakeProvider:
+            def edit_image(self, *, prompt, size, image_paths):
+                calls.append((prompt, list(image_paths)))
+                buffer = BytesIO()
+                Image.new("RGB", (1024, 1024), "white").save(buffer, format="PNG")
+                return buffer.getvalue()
+
+        provider = FakeProvider()
+        pipeline = KeleFiveImagePipeline(provider)
+        product = {"name": "Logo product", "brand": "Brand", "model": "ZF-LOGO"}
+
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.png"
+            logo = Path(tmp) / "logo.png"
+            Image.new("RGB", (800, 800), "white").save(source)
+            Image.new("RGBA", (200, 200), (0, 0, 0, 0)).save(logo)
+            pipeline.generate_five_images(
+                output_dir=Path(tmp),
+                job_id="job",
+                product=product,
+                project={},
+                source_image_path=source,
+                reference_image_paths={"logo": logo},
+            )
+
+        main_prompt, main_paths = calls[0]
+        self.assertEqual(main_paths, [source, logo])
+        self.assertIn("upper-left corner", main_prompt)
+        for prompt, image_paths in (*calls[1:3], calls[-1]):
+            self.assertNotIn(logo, image_paths)
+
+    def test_certificate_generation_does_not_add_backend_qc_stamp_after_model_image(self):
+        class FakeProvider:
+            def edit_image(self, *, prompt, size, image_paths):
+                image = Image.new("RGB", (1024, 1024), "white")
+                buffer = BytesIO()
+                image.save(buffer, format="PNG")
+                return buffer.getvalue()
+
+        provider = FakeProvider()
+        pipeline = KeleFiveImagePipeline(provider, font_path="C:/Windows/Fonts/msyh.ttc")
+        product = {
+            "name": "厚抹生乳茶",
+            "brand": "别样泡泡",
+            "model": "500ml",
+            "category": "食品饮料",
+        }
+        project = {
+            "barcode_type": "EAN_13",
+            "barcode_value": "6924613866618",
+            "certificate_config": {"production_date": "2026-08-19", "inspector": "QC-01"},
+        }
+        original_overlay = real_image._overlay_certificate_qc_stamp
+
+        def forbid_overlay(*_args, **_kwargs):
+            raise AssertionError("certificate generation must rely on model-generated qc stamp")
+
+        real_image._overlay_certificate_qc_stamp = forbid_overlay
+        try:
+            with TemporaryDirectory() as tmp:
+                source = Path(tmp) / "source.png"
+                Image.new("RGB", (800, 800), "white").save(source)
+                outputs = pipeline.generate_five_images(
+                    output_dir=Path(tmp),
+                    job_id="job",
+                    product=product,
+                    project=project,
+                    source_image_path=source,
+                )
+        finally:
+            real_image._overlay_certificate_qc_stamp = original_overlay
+
+        self.assertEqual(len(outputs), 5)
 
     def test_detail_output_is_allowed_to_be_ecommerce_design(self):
         prompt = _prompt_for(
@@ -835,11 +1065,10 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("The package must be physically large enough to contain the uploaded product and every unit implied by the user-entered specification model", prompt)
         self.assertIn("Treat quantity expressions in the specification model, such as 6 bottles, 6 pcs, x6, ×6, 500ml×6瓶, or one box of multiple units, as hard packing capacity requirements", prompt)
         self.assertIn("Do not generate a package sized for only one unit when the specification model says multiple units", prompt)
-        self.assertIn("Package dimensions, internal volume, divider/spacing allowance, and external proportions must obey real packing physics", prompt)
-        self.assertIn("Package physical capacity has higher priority than reference package style, composition, beauty, and front display completeness", prompt)
-        self.assertIn("The visible package must look larger than the product in every required loading direction", prompt)
-        self.assertIn("For bottle, cup, can, jar, and drink products, the package internal height must be greater than the product height when packed upright", prompt)
-        self.assertIn("If the product is shown standing beside the package, the package must not appear shorter, thinner, or too narrow to contain that product", prompt)
+        self.assertIn("Include realistic padding, dividers when needed, and closure clearance", prompt)
+        self.assertIn("Package physical capacity has higher priority than reference package style and composition", prompt)
+        self.assertNotIn("The visible package must look larger than the product in every required loading direction", prompt)
+        self.assertNotIn("For bottle, cup, can, jar, and drink products, the package internal height must be greater than the product height when packed upright", prompt)
         self.assertIn("Detected multi-unit bottle specification: 6 bottles", prompt)
         self.assertIn("Use a six-bottle carton packing structure, not a single-bottle gift box", prompt)
         self.assertIn("Arrange the internal capacity as 3 bottles by 2 bottles upright", prompt)
@@ -883,6 +1112,8 @@ class RealImagePipelinePromptTests(unittest.TestCase):
                 self.assertIn("Do not create a front information area", prompt)
                 self.assertIn("The barcode must be directly below the side information area", prompt)
                 self.assertIn("The barcode and all information rows must remain fully visible, uncropped, unobstructed, and inside the same side panel", prompt)
+                self.assertIn("Package information text and barcode must be locked to the same physical side-panel plane", prompt)
+                self.assertIn("must not float in the white background, cross outside the side-panel edges, or look like a screen overlay", prompt)
                 self.assertNotIn("If the package reference has a visible barcode placement", prompt)
                 self.assertNotIn("lower-left corner of the package front", prompt)
 
@@ -898,7 +1129,7 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("If the visual source contains old or conflicting text, keep only the product appearance or package style", prompt)
         self.assertNotIn("If a user-entered value conflicts with the visible product category, structure, or appearance, omit that row", prompt)
 
-    def test_detail_module_prompts_preserve_logo_markings_and_avoid_props(self):
+    def test_detail_module_prompts_preserve_logo_markings_and_scope_props_to_non_scene_modules(self):
         prompts = _detail_module_prompts(
             {
                 "name": "Jeep thermos cup",
@@ -909,15 +1140,22 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         )
 
         self.assertTrue(prompts)
-        for prompt in prompts:
+        self.assertEqual(len(prompts), 4)
+        for index, prompt in enumerate(prompts):
             with self.subTest(prompt=prompt):
                 self.assertIn("exact same visible product logo", prompt)
                 self.assertIn("tiny registered trademark symbol", prompt)
-                self.assertIn("plain white or very light neutral background", prompt)
-                self.assertIn("no laptop, no books, no pen, no plant", prompt)
-                self.assertNotIn("usage scene", prompt)
-                self.assertNotIn("daily use", prompt)
                 self.assertNotIn("未填写", prompt)
+                if index in (1, 2):
+                    self.assertIn("usage scene", prompt)
+                    self.assertIn("exactly two aligned real-world usage scenes", prompt)
+                    self.assertIn("realistic usage environments", prompt)
+                    self.assertNotIn("no lifestyle environment", prompt)
+                    self.assertNotIn("no laptop, no books, no pen, no plant", prompt)
+                else:
+                    self.assertIn("plain white or very light neutral background", prompt)
+                    self.assertIn("no laptop, no books, no pen, no plant", prompt)
+                    self.assertNotIn("usage scene", prompt)
 
     def test_detail_module_prompts_keep_all_product_parts_from_same_reference(self):
         prompts = _detail_module_prompts(
@@ -1285,7 +1523,8 @@ class RealImagePipelinePromptTests(unittest.TestCase):
 
         prompt = _prompt_for("package", product, project)
 
-        self.assertIn("designed retail packaging, not an oversized shipping package", prompt)
+        self.assertIn("designed retail packaging", prompt)
+        self.assertNotIn("not an oversized shipping package", prompt)
         self.assertIn("no unnecessary artificial printed border", prompt)
         self.assertIn("unless that border style comes from the package reference", prompt)
         self.assertIn("side face should stay visually simple", prompt)
@@ -1342,6 +1581,9 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("not bold, not blurry, not thickened, not smeared", prompt)
         self.assertIn("no malformed barcode shape, no broken barcode structure, no decorative fake barcode shape", prompt)
         self.assertIn("first digit outside the barcode bars on the left", prompt)
+        self.assertIn("first digit must sit left of the start guard bars, outside the bar area", prompt)
+        self.assertIn("left six digits start after the start guard with the second barcode digit", prompt)
+        self.assertIn("the first digit must not appear below vertical bars or inside the left six-digit group", prompt)
         self.assertIn("start guard two bars, center guard two bars before the eighth digit, and end guard two bars are the longest", prompt)
         self.assertIn("bars must vary naturally in width and height like a real EAN retail barcode", prompt)
         self.assertIn("side information zone reasonably visible to the camera", prompt)
@@ -1672,14 +1914,64 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         detail_prompts = [prompt for prompt in provider.prompts if "detail module" in prompt]
         self.assertEqual(len(detail_prompts), len(_detail_module_prompts(product)))
         self.assertEqual(len(detail_prompts), 4)
-        self.assertTrue(any("product hero" in prompt for prompt in detail_prompts))
-        self.assertTrue(any("product-only feature section" in prompt for prompt in detail_prompts))
-        self.assertFalse(any("usage scene" in prompt for prompt in detail_prompts))
-        self.assertFalse(any("daily use" in prompt for prompt in detail_prompts))
-        self.assertTrue(any("close-up detail" in prompt for prompt in detail_prompts))
-        self.assertFalse(any("close-up detail 2" in prompt for prompt in detail_prompts))
-        self.assertTrue(any("structure and scale visual reference" in prompt for prompt in detail_prompts))
+        self.assertIn("product hero", detail_prompts[0])
+        self.assertIn("Place the brand in the upper-left corner", detail_prompts[0])
+        self.assertIn("usage scene section", detail_prompts[1])
+        self.assertIn("exactly two aligned real-world usage scenes", detail_prompts[1])
+        self.assertIn("usage scene section 2", detail_prompts[2])
+        self.assertIn("exactly two aligned real-world usage scenes", detail_prompts[2])
+        self.assertIn("structure and scale visual reference", detail_prompts[3])
+        self.assertFalse(any("product-only feature section" in prompt for prompt in detail_prompts))
+        self.assertFalse(any("no lifestyle environment" in prompt for prompt in detail_prompts))
         self.assertTrue(all("finished ecommerce detail section" in prompt for prompt in detail_prompts))
+
+    def test_generation_continues_remaining_outputs_after_one_provider_call_fails(self):
+        class IntermittentProvider:
+            def __init__(self):
+                self.prompts: list[str] = []
+
+            def edit_image(self, *, prompt, size, image_paths):
+                self.prompts.append(prompt)
+                if "Package brand rendering rule" in prompt:
+                    raise RuntimeError("KELE_HTTP_500: package failed")
+                image = Image.new("RGB", (800, 800), "#ffffff")
+                buffer = BytesIO()
+                image.save(buffer, format="PNG")
+                return buffer.getvalue()
+
+        provider = IntermittentProvider()
+        pipeline = KeleFiveImagePipeline(provider, font_path="C:/Windows/Fonts/msyh.ttc")
+        product = {
+            "name": "智枫保温杯",
+            "brand": "智枫",
+            "model": "ZF-CUP-800",
+            "category": "日用品",
+            "specs": [{"key": "容量", "value": "800", "unit": "ml"}],
+        }
+        project = {
+            "barcode_type": "EAN_13",
+            "barcode_value": "4006381333931",
+            "detail_config": {"selling_points": ["保温", "便携", "耐用"]},
+        }
+
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.png"
+            Image.new("RGB", (800, 800), "white").save(source)
+            with self.assertRaisesRegex(RuntimeError, "PARTIAL_IMAGE_GENERATION_FAILED"):
+                pipeline.generate_five_images(
+                    output_dir=Path(tmp),
+                    job_id="job",
+                    product=product,
+                    project=project,
+                    source_image_path=source,
+                )
+
+            job_dir = Path(tmp) / "job"
+            self.assertTrue((job_dir / "main.png").exists())
+            self.assertTrue((job_dir / "certificate.png").exists())
+            self.assertFalse((job_dir / "package.png").exists())
+            self.assertTrue((job_dir / "detail.png").exists())
+            self.assertTrue((job_dir / "scene.png").exists())
 
     def test_provider_edit_size_can_differ_from_final_output_size(self):
         class FakeProvider:

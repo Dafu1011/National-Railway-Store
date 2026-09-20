@@ -28,6 +28,15 @@ describe("generation error UX", () => {
     expect(message).toBe("网络不佳，请检查网络后重试。");
   });
 
+  it("surfaces output quality failures instead of network retry guidance", () => {
+    const message = generationErrorMessage(
+      new Error("OUTPUT_QUALITY_FAILED: certificate: CERTIFICATE_CARD_TOO_LARGE_FOR_BULKY_PRODUCT"),
+    );
+
+    expect(message).toBe("图片未通过质检，请调整素材或重新生成。");
+    expect(message).not.toContain("网络");
+  });
+
   it("shows output file errors in readable Chinese even when the backend message is mojibake", () => {
     const message = generationErrorMessage(new Error("OUTPUT_FILE_NOT_FOUND: 杈撳嚭鏂囦欢涓嶅瓨鍦ㄣ€?"));
 
