@@ -426,8 +426,9 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("the red quality inspection stamp is the inspector field value", prompt)
         self.assertIn("Place the stamp in or near the inspector field value area", prompt)
         self.assertIn("do not remove, hide, or omit the 检验员 label", prompt)
-        self.assertIn("Render exactly one red quality inspection stamp directly on the certificate", prompt)
-        self.assertIn("make the stamp about 1.3x the current visual stamp size", prompt)
+        self.assertIn("Render exactly one small red circular quality inspection stamp directly on the certificate", prompt)
+        self.assertIn("small red circular quality inspection stamp", prompt)
+        self.assertIn("about two thirds of the previous visual size", prompt)
         self.assertIn("quality inspection stamp completely inside the certificate card boundary", prompt)
         self.assertIn("not covering, touching, or overlapping the barcode", prompt)
         self.assertNotIn("The backend will render the inspector value after image generation", prompt)
@@ -736,7 +737,7 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("Required certificate layout", prompt)
         self.assertIn("one red quality inspection stamp based on QC-01", prompt)
         self.assertIn("one barcode using the entered barcode type and digits", prompt)
-        self.assertIn("make the stamp about 1.3x the current visual stamp size", prompt)
+        self.assertIn("small circular stamp", prompt)
         self.assertIn("manufacturer: 智枫生产厂家", prompt)
         self.assertIn("factory address: 吉林省长春市南关区幸福街888号", prompt)
 
@@ -1149,6 +1150,7 @@ class RealImagePipelinePromptTests(unittest.TestCase):
                 if index in (1, 2):
                     self.assertIn("usage scene", prompt)
                     self.assertIn("exactly two aligned real-world usage scenes", prompt)
+                    self.assertIn("genuinely different real camera moments", prompt)
                     self.assertIn("realistic usage environments", prompt)
                     self.assertNotIn("no lifestyle environment", prompt)
                     self.assertNotIn("no laptop, no books, no pen, no plant", prompt)
@@ -1156,6 +1158,104 @@ class RealImagePipelinePromptTests(unittest.TestCase):
                     self.assertIn("plain white or very light neutral background", prompt)
                     self.assertIn("no laptop, no books, no pen, no plant", prompt)
                     self.assertNotIn("usage scene", prompt)
+
+    def test_detail_module_prompts_generate_usage_scenes_from_uploaded_product_not_hardcoded_slots(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "四轮扫雪车",
+                "brand": "中力",
+                "model": "ZL-F7",
+                "category": "大型清洁机械",
+            }
+        )
+
+        for prompt in prompts[1:3]:
+            with self.subTest(prompt=prompt):
+                self.assertIn("Infer four real usage scenarios from the uploaded product itself", prompt)
+                self.assertIn("do not use preset scene categories or a fixed template", prompt)
+                self.assertIn("Each scenario must show a genuinely different real use of this exact uploaded product", prompt)
+                self.assertNotIn("equipment operating in its normal worksite or field environment", prompt)
+                self.assertNotIn("transport, loading, or roadside deployment", prompt)
+                self.assertNotIn("maintenance, inspection, or service-bay moment", prompt)
+                self.assertNotIn("warehouse, storage yard, showroom, or pre-operation staging moment", prompt)
+
+    def test_detail_usage_scene_modules_assign_four_distinct_scenes_across_two_images(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "蓝牙鼠标",
+                "brand": "智枫",
+                "model": "ZF-M1",
+                "category": "电脑外设",
+            }
+        )
+
+        first_usage = prompts[1]
+        second_usage = prompts[2]
+
+        self.assertIn("Scene allocation is fixed across the two usage-scene images", first_usage)
+        self.assertIn("This image may contain Scene 1 and Scene 2 only", first_usage)
+        self.assertIn("Do not include Scene 3 or Scene 4 in this image", first_usage)
+        self.assertIn("Scene 1 and Scene 2 must be chosen from the product-specific four-scene plan", first_usage)
+        self.assertNotIn("Scene 1: office or desk-use scene", first_usage)
+        self.assertNotIn("Scene 2: mobile or on-the-go scene", first_usage)
+        self.assertNotIn("Scene 3: charging or setup scene", first_usage)
+        self.assertNotIn("Scene 4: storage or workspace-prep scene", first_usage)
+
+        self.assertIn("Scene allocation is fixed across the two usage-scene images", second_usage)
+        self.assertIn("This image may contain Scene 3 and Scene 4 only", second_usage)
+        self.assertIn("Do not include Scene 1 or Scene 2 in this image", second_usage)
+        self.assertIn("Scene 3 and Scene 4 must be chosen from the product-specific four-scene plan", second_usage)
+        self.assertNotIn("Scene 1: office or desk-use scene", second_usage)
+        self.assertNotIn("Scene 2: mobile or on-the-go scene", second_usage)
+        self.assertNotIn("Scene 3: charging or setup scene", second_usage)
+        self.assertNotIn("Scene 4: storage or workspace-prep scene", second_usage)
+
+        for prompt in (first_usage, second_usage):
+            with self.subTest(prompt=prompt):
+                self.assertIn("The four scenes must be mutually exclusive", prompt)
+                self.assertIn("Do not reuse the same environment, props, action, camera angle, composition, lighting, caption, or background with small changes", prompt)
+
+    def test_detail_usage_scene_modules_share_one_product_specific_scene_plan(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "折叠露营桌",
+                "brand": "山野集",
+                "model": "ZY-CAMP-120",
+                "category": "户外用品",
+            }
+        )
+        first_usage = prompts[1]
+        second_usage = prompts[2]
+
+        marker = "Shared product-specific four-scene plan:"
+        self.assertIn(marker, first_usage)
+        self.assertIn(marker, second_usage)
+        first_plan = first_usage.split(marker, 1)[1].split("Scene allocation is fixed", 1)[0]
+        second_plan = second_usage.split(marker, 1)[1].split("Scene allocation is fixed", 1)[0]
+
+        self.assertEqual(first_plan, second_plan)
+        self.assertIn("Scene 1: infer the most natural real use of this exact uploaded product", first_plan)
+        self.assertIn("Scene 2: infer a second real use with a different user purpose", first_plan)
+        self.assertIn("Scene 3: infer a third real use with a different real environment", first_plan)
+        self.assertIn("Scene 4: infer a fourth active use with a different user goal", first_plan)
+        self.assertIn("Do not choose these from preset categories", first_plan)
+
+    def test_detail_usage_scene_plan_requires_active_use_and_excludes_maintenance_for_motorcycles(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "复古巡航摩托车",
+                "brand": "山海",
+                "model": "SH-500",
+                "category": "摩托车",
+            }
+        )
+
+        for prompt in prompts[1:3]:
+            with self.subTest(prompt=prompt):
+                self.assertIn("Active-use-only rule", prompt)
+                self.assertIn("For vehicles and motorcycles, usage scenes must show riding, driving, commuting, travel, road, terrain, passenger, or cargo use", prompt)
+                self.assertIn("Do not use maintenance, upkeep, repair, cleaning, inspection, storage, display, after-sales, disassembly, charging, packaging, or unboxing as usage scenes", prompt)
+                self.assertIn("不要把保养、维修、清洁、检查、仓储、陈列、售后、拆装、充电、包装或开箱当作使用场景", prompt)
 
     def test_detail_module_prompts_keep_all_product_parts_from_same_reference(self):
         prompts = _detail_module_prompts(
@@ -1918,8 +2018,11 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("Place the brand in the upper-left corner", detail_prompts[0])
         self.assertIn("usage scene section", detail_prompts[1])
         self.assertIn("exactly two aligned real-world usage scenes", detail_prompts[1])
+        self.assertIn("Infer four real usage scenarios from the uploaded product itself", detail_prompts[1])
+        self.assertIn("Scene 1 and Scene 2 must be chosen from the product-specific four-scene plan", detail_prompts[1])
         self.assertIn("usage scene section 2", detail_prompts[2])
         self.assertIn("exactly two aligned real-world usage scenes", detail_prompts[2])
+        self.assertIn("Scene 3 and Scene 4 must be chosen from the product-specific four-scene plan", detail_prompts[2])
         self.assertIn("structure and scale visual reference", detail_prompts[3])
         self.assertFalse(any("product-only feature section" in prompt for prompt in detail_prompts))
         self.assertFalse(any("no lifestyle environment" in prompt for prompt in detail_prompts))

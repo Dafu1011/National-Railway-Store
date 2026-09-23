@@ -1,6 +1,6 @@
 {
   "name": "huizhizuo-web",
-  "version": "2.0.19",
+  "version": "2.0.20",
   "description": "Huizhizuo desktop workbench",
   "author": "Huizhizuo",
   "private": true,
@@ -65,8 +65,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "perMachine": true,
-      "allowElevation": true,
+      "perMachine": false,
+      "allowElevation": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true

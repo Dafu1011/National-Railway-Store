@@ -206,7 +206,7 @@ def _draw_detail_page(
 ) -> None:
     sections = [
         ("商品首屏", product.get("name", "")),
-        ("使用场景", "适合日常、仓储、门店陈列和电商详情展示。"),
+        ("使用场景", "适合日常、工作、出行、作业、门店陈列和电商详情展示。"),
         ("商品细节", f"材质: {product.get('material', '')}  颜色: {product.get('color', '')}"),
         ("规格尺寸", _spec_text(product)),
         ("条形码信息", f"{project['barcode_type']} / {project['barcode_value']}"),

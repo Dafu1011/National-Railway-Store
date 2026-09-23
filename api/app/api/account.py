@@ -13,6 +13,12 @@ from app.storage import AppStorage, row_to_dict
 router = APIRouter(prefix="/api/v1", tags=["account"])
 
 
+"""
+    管理员充值接口的请求体模型：
+
+    points：整数，必须大于 0，且最大不超过 10,000,000。
+    remark：字符串，默认空字符串，最大长度 120。
+"""
 class RechargePayload(BaseModel):
     points: int = Field(gt=0, le=10_000_000)
     remark: str = Field(default="", max_length=120)
