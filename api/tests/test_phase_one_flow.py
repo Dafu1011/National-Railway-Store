@@ -14,62 +14,89 @@ from app.providers.real_image import GeneratedImage
 
 
 class PhaseOneFlowTests(unittest.TestCase):
-    def test_email_registration_uses_mail_code_before_account_creation(self):
+    def test_phone_registration_requires_sms_code_and_enabled_invitation_code(self):
         with TemporaryDirectory() as data_dir:
             app = create_app(data_dir=data_dir)
+            with app.state.storage.connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO invitation_codes (id, code, is_enabled, use_count)
+                    VALUES ('invite-1', 'VIP2026', 1, 0)
+                    """
+                )
             with TestClient(app) as client:
                 missing_code_register = client.post(
                     "/api/v1/auth/register",
                     json={
                         "username": "验证用户",
-                        "email": "verify-me@qq.com",
+                        "phone": "13800138000",
+                        "invitation_code": "VIP2026",
                         "verification_code": "000000",
                         "password": "StrongPass123",
                     },
                 )
                 self.assertEqual(missing_code_register.status_code, 400)
-                self.assertEqual(missing_code_register.json()["detail"]["code"], "EMAIL_CODE_INVALID")
+                self.assertEqual(missing_code_register.json()["detail"]["code"], "PHONE_CODE_INVALID")
+
+                missing_invite_register = client.post(
+                    "/api/v1/auth/register",
+                    json={
+                        "username": "验证用户",
+                        "phone": "13800138000",
+                        "verification_code": "000000",
+                        "password": "StrongPass123",
+                    },
+                )
+                self.assertEqual(missing_invite_register.status_code, 422)
 
                 send_code_response = client.post(
                     "/api/v1/auth/registration-code",
-                    json={"email": "verify-me@qq.com"},
+                    json={"phone": "13800138000"},
                 )
                 self.assertEqual(send_code_response.status_code, 202)
                 send_code_payload = send_code_response.json()
-                self.assertEqual(send_code_payload["email"], "verify-me@qq.com")
+                self.assertEqual(send_code_payload["phone"], "13800138000")
                 self.assertEqual(len(send_code_payload["debug_code"]), 6)
 
                 wrong_code_register = client.post(
                     "/api/v1/auth/register",
                     json={
                         "username": "验证用户",
-                        "email": "verify-me@qq.com",
+                        "phone": "13800138000",
+                        "invitation_code": "VIP2026",
                         "verification_code": "111111",
                         "password": "StrongPass123",
                     },
                 )
                 self.assertEqual(wrong_code_register.status_code, 400)
-                self.assertEqual(wrong_code_register.json()["detail"]["code"], "EMAIL_CODE_INVALID")
+                self.assertEqual(wrong_code_register.json()["detail"]["code"], "PHONE_CODE_INVALID")
 
                 register_response = client.post(
                     "/api/v1/auth/register",
                     json={
                         "username": "验证用户",
-                        "email": "verify-me@qq.com",
+                        "phone": "13800138000",
+                        "invitation_code": "VIP2026",
                         "verification_code": send_code_payload["debug_code"],
                         "password": "StrongPass123",
                     },
                 )
                 self.assertEqual(register_response.status_code, 201)
                 register_payload = register_response.json()
-                self.assertEqual(register_payload["user"]["email"], "verify-me@qq.com")
+                self.assertEqual(register_payload["user"]["phone"], "13800138000")
                 self.assertEqual(register_payload["user"]["username"], "验证用户")
-                self.assertTrue(register_payload["user"]["email_verified"])
+                self.assertTrue(register_payload["user"]["phone_verified"])
                 self.assertIn("access_token", register_payload)
+                with app.state.storage.connect() as connection:
+                    user_row = connection.execute("SELECT invitation_code_id, invitation_code FROM users WHERE phone = ?", ("13800138000",)).fetchone()
+                    invite_row = connection.execute("SELECT use_count FROM invitation_codes WHERE code = ?", ("VIP2026",)).fetchone()
+                self.assertEqual(user_row["invitation_code_id"], "invite-1")
+                self.assertEqual(user_row["invitation_code"], "VIP2026")
+                self.assertEqual(invite_row["use_count"], 1)
 
                 login_response = client.post(
                     "/api/v1/auth/login",
-                    json={"email": "verify-me@qq.com", "password": "StrongPass123"},
+                    json={"phone": "13800138000", "password": "StrongPass123"},
                 )
                 self.assertEqual(login_response.status_code, 200)
                 self.assertIn("access_token", login_response.json())
@@ -89,12 +116,11 @@ class PhaseOneFlowTests(unittest.TestCase):
                 refresh_after_logout = client.post("/api/v1/auth/refresh")
                 self.assertEqual(refresh_after_logout.status_code, 401)
 
-                unsupported_email = client.post(
+                invalid_phone = client.post(
                     "/api/v1/auth/registration-code",
-                    json={"email": "someone@example.com"},
+                    json={"phone": "123"},
                 )
-                self.assertEqual(unsupported_email.status_code, 400)
-                self.assertEqual(unsupported_email.json()["detail"]["code"], "EMAIL_DOMAIN_UNSUPPORTED")
+                self.assertEqual(invalid_phone.status_code, 422)
 
     def test_password_login_refresh_session_defaults_to_seven_days(self):
         original = os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS")
@@ -187,31 +213,32 @@ class PhaseOneFlowTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 401)
                 self.assertEqual(response.json()["detail"]["code"], "REFRESH_INVALID")
 
-    def test_password_reset_with_email_code_changes_password_and_revokes_refresh_sessions(self):
+    def test_password_reset_with_phone_code_changes_password_and_revokes_refresh_sessions(self):
         with TemporaryDirectory() as data_dir:
             app = create_app(data_dir=data_dir)
             with TestClient(app) as client:
                 old_token = verified_token(client, "reset-password@example.com", password="OldPass123")
                 user = client.get("/api/v1/users/me", headers={"Authorization": f"Bearer {old_token}"}).json()
 
-                code_response = client.post("/api/v1/auth/password-reset-code", json={"email": "reset-password@qq.com"})
+                phone = phone_for_email("reset-password@qq.com")
+                code_response = client.post("/api/v1/auth/password-reset-code", json={"phone": phone})
                 self.assertEqual(code_response.status_code, 202)
                 reset_response = client.post(
                     "/api/v1/auth/reset-password",
                     json={
-                        "email": "reset-password@qq.com",
+                        "phone": phone,
                         "verification_code": code_response.json()["debug_code"],
                         "new_password": "NewPass123",
                     },
                 )
                 self.assertEqual(reset_response.status_code, 200)
-                self.assertEqual(reset_response.json()["email"], "reset-password@qq.com")
+                self.assertEqual(reset_response.json()["phone"], phone)
 
                 old_token_response = client.get("/api/v1/users/me", headers={"Authorization": f"Bearer {old_token}"})
                 self.assertEqual(old_token_response.status_code, 401)
-                old_login = client.post("/api/v1/auth/login", json={"email": "reset-password@qq.com", "password": "OldPass123"})
+                old_login = client.post("/api/v1/auth/login", json={"phone": phone, "password": "OldPass123"})
                 self.assertEqual(old_login.status_code, 401)
-                new_login = client.post("/api/v1/auth/login", json={"email": "reset-password@qq.com", "password": "NewPass123"})
+                new_login = client.post("/api/v1/auth/login", json={"phone": phone, "password": "NewPass123"})
                 self.assertEqual(new_login.status_code, 200)
                 with app.state.storage.connect() as connection:
                     old_refresh = connection.execute(
@@ -1087,21 +1114,41 @@ def parse_dt(value: str) -> datetime:
 def verified_token(client: TestClient, email: str, password: str = "StrongPass123") -> str:
     if email.endswith("@example.com"):
         email = email.replace("@example.com", "@qq.com")
-    send_code = client.post("/api/v1/auth/registration-code", json={"email": email})
+    phone = phone_for_email(email)
+    ensure_test_invitation_code(client)
+    send_code = client.post("/api/v1/auth/registration-code", json={"phone": phone})
     assert send_code.status_code == 202, send_code.text
     register = client.post(
         "/api/v1/auth/register",
         json={
             "username": email.split("@", 1)[0],
             "email": email,
+            "phone": phone,
+            "invitation_code": "TEST2026",
             "verification_code": send_code.json()["debug_code"],
             "password": password,
         },
     )
     assert register.status_code == 201, register.text
-    login = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    login = client.post("/api/v1/auth/login", json={"phone": phone, "password": password})
     assert login.status_code == 200, login.text
     return login.json()["access_token"]
+
+
+def phone_for_email(email: str) -> str:
+    digest = phase_one.hashlib.sha256(email.lower().encode("utf-8")).hexdigest()
+    digits = "".join(str(int(char, 16) % 10) for char in digest)
+    return "13" + digits[:9]
+
+
+def ensure_test_invitation_code(client: TestClient) -> None:
+    with client.app.state.storage.connect() as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO invitation_codes (id, code, is_enabled, use_count)
+            VALUES ('test-invite-code', 'TEST2026', 1, 0)
+            """
+        )
 
 
 def upload_product_original(client: TestClient, headers: dict[str, str], product_id: str) -> dict[str, object]:

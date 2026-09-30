@@ -158,7 +158,13 @@ class AccountBillingTests(unittest.TestCase):
                 outputs = []
                 for output_type in ["main", "certificate", "package", "scene"]:
                     path = job_dir / f"{output_type}.png"
-                    Image.new("RGB", (800, 800), "white").save(path)
+                    image = Image.new("RGB", (800, 800), "white")
+                    if output_type == "certificate":
+                        from PIL import ImageDraw
+
+                        draw = ImageDraw.Draw(image)
+                        draw.rectangle((330, 520, 540, 660), fill=(248, 248, 246), outline=(0, 87, 165), width=3)
+                    image.save(path)
                     outputs.append(GeneratedImage(output_type=output_type, width=800, height=800, path=path))
                 return outputs
 

@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.account import router as account_router
 from app.api.phase_one import router as phase_one_router
+from app.api.single_image import router as single_image_router
 from app.api.standards import router as standards_router
 from app.api.updates import router as updates_router
 from app.core.object_storage import load_object_storage_config
@@ -33,6 +34,7 @@ def create_app(data_dir: str | Path | None = None, *, load_env: bool = False) ->
         allow_headers=["*"],
     )
     app.include_router(phase_one_router)
+    app.include_router(single_image_router)
     app.include_router(account_router)
     app.include_router(standards_router)
     app.include_router(updates_router)

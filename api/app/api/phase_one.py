@@ -30,7 +30,7 @@ from app.core.billing import (
     release_generation_hold,
     reserve_generation_charge,
 )
-from app.core.email_sender import EmailNotConfigured, send_registration_code_email
+from app.core.sms_sender import SmsNotConfigured, send_registration_code_sms
 from app.core.object_storage import material_object_key
 
 
@@ -46,6 +46,7 @@ ALLOWED_ASSET_TYPES = {
     "logo",
     "certificate_reference",
     "package_reference",
+    "single_image_reference",
 }
 ALLOWED_IMAGE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
@@ -53,19 +54,21 @@ MAX_IMAGE_PIXELS = 24_000_000
 
 
 class RegistrationCodePayload(BaseModel):
-    email: str = Field(min_length=3, max_length=254)
+    phone: str = Field(min_length=6, max_length=32)
 
-    @field_validator("email")
+    @field_validator("phone")
     @classmethod
-    def validate_email(cls, value: str) -> str:
-        normalized = value.strip().lower()
-        if "@" not in normalized or normalized.startswith("@") or normalized.endswith("@"):
-            raise ValueError("email format is invalid")
+    def validate_phone(cls, value: str) -> str:
+        normalized = normalize_phone(value)
+        if not is_valid_phone(normalized):
+            raise ValueError("phone format is invalid")
         return normalized
 
 
 class RegisterPayload(RegistrationCodePayload):
     username: str = Field(min_length=1, max_length=60)
+    invitation_code: str = Field(min_length=1, max_length=64)
+    email: str | None = Field(default=None, max_length=254)
     verification_code: str = Field(min_length=4, max_length=8)
     password: str = Field(min_length=8, max_length=128)
 
@@ -85,15 +88,35 @@ class RegisterPayload(RegistrationCodePayload):
             raise ValueError("verification code must be numeric")
         return normalized
 
-
-class LoginPayload(BaseModel):
-    email: str = Field(min_length=3, max_length=254)
-    password: str = Field(min_length=8, max_length=128)
+    @field_validator("invitation_code")
+    @classmethod
+    def normalize_invitation_code(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("invitation code is required")
+        return normalized
 
     @field_validator("email")
     @classmethod
-    def validate_email(cls, value: str) -> str:
-        return RegisterPayload.validate_email(value)
+    def normalize_optional_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+        if "@" not in normalized or normalized.startswith("@") or normalized.endswith("@"):
+            raise ValueError("email format is invalid")
+        return normalized
+
+
+class LoginPayload(BaseModel):
+    phone: str = Field(min_length=6, max_length=32)
+    password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, value: str) -> str:
+        return RegistrationCodePayload.validate_phone(value)
 
 
 class PasswordResetCodePayload(RegistrationCodePayload):
@@ -217,46 +240,44 @@ async def send_registration_code(
     storage: AppStorage = Depends(get_storage),
     runtime_services: Any = Depends(get_runtime_services),
 ) -> dict[str, Any]:
-    email_key = hashlib.sha256(payload.email.lower().encode("utf-8")).hexdigest()
-    if not is_supported_registration_email(payload.email):
-        raise_error(status.HTTP_400_BAD_REQUEST, "EMAIL_DOMAIN_UNSUPPORTED", "娉ㄥ唽閭浠呮敮鎸?QQ 閭鍜岀綉鏄撻偖绠便€?")
-    if runtime_services.hit_rate_limit(f"rate:registration-code:{email_key}", limit=5, window_seconds=3600):
-        raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "EMAIL_CODE_RATE_LIMITED", "楠岃瘉鐮佽姹傝繃浜庨绻併€?")
+    phone_key = hashlib.sha256(payload.phone.encode("utf-8")).hexdigest()
+    if runtime_services.hit_rate_limit(f"rate:registration-code:{phone_key}", limit=5, window_seconds=3600):
+        raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "PHONE_CODE_RATE_LIMITED", "验证码请求过于频繁。")
     code = f"{secrets.randbelow(1_000_000):06d}"
     expires_minutes = registration_code_expire_minutes()
     try:
-        with runtime_services.lock(f"lock:register:{email_key}", ttl_seconds=30):
+        with runtime_services.lock(f"lock:register:{phone_key}", ttl_seconds=30):
             with storage.connect() as connection:
                 existing_user = connection.execute(
-                    "SELECT id FROM users WHERE email_normalized = ? OR email = ?",
-                    (payload.email.lower(), payload.email.lower()),
+                    "SELECT id FROM users WHERE phone_normalized = ? OR phone = ?",
+                    (payload.phone, payload.phone),
                 ).fetchone()
                 if existing_user is not None:
-                    raise_error(status.HTTP_409_CONFLICT, "EMAIL_ALREADY_REGISTERED", "璇ラ偖绠卞凡缁忔敞鍐屻€?")
-                # Keep only the latest unused registration code for one email.
+                    raise_error(status.HTTP_409_CONFLICT, "PHONE_ALREADY_REGISTERED", "该手机号已经注册。")
+                # Keep only the latest unused registration code for one phone.
                 connection.execute(
                     """
-                    UPDATE email_verification_codes
+                    UPDATE phone_verification_codes
                     SET consumed_at = CURRENT_TIMESTAMP
-                    WHERE email = ? AND purpose = 'register' AND consumed_at IS NULL
+                    WHERE phone = ? AND purpose = 'register' AND consumed_at IS NULL
                     """,
-                    (payload.email.lower(),),
+                    (payload.phone,),
                 )
                 connection.execute(
                     """
-                    INSERT INTO email_verification_codes (id, email, code_hash, purpose, expires_at)
+                    INSERT INTO phone_verification_codes (id, phone, code_hash, purpose, expires_at)
                     VALUES (?, ?, ?, 'register', ?)
                     """,
-                    (new_id(), payload.email.lower(), hash_registration_code(payload.email, code), utc_after(minutes=expires_minutes)),
+                    (new_id(), payload.phone, hash_registration_code(payload.phone, code), utc_after(minutes=expires_minutes)),
                 )
-        send_registration_code_email(payload.email, code, expires_minutes=expires_minutes)
-    except EmailNotConfigured:
-        raise_error(status.HTTP_503_SERVICE_UNAVAILABLE, "SMTP_NOT_CONFIGURED", "閭鍙戦€佹湇鍔″皻鏈厤缃€?")
+        send_registration_code_sms(payload.phone, code, expires_minutes=expires_minutes)
+    except SmsNotConfigured:
+        raise_error(status.HTTP_503_SERVICE_UNAVAILABLE, "SMS_NOT_CONFIGURED", "短信验证码服务尚未配置。")
     except Exception as exc:
         if str(exc).startswith("LOCK_BUSY"):
-            raise_error(status.HTTP_409_CONFLICT, "REGISTER_IN_PROGRESS", "璇ラ偖绠辨鍦ㄥ鐞嗘敞鍐岃姹傘€?")
+            raise_error(status.HTTP_409_CONFLICT, "REGISTER_IN_PROGRESS", "该手机号正在处理注册请求。")
         raise
-    result = {"email": payload.email.lower(), "expires_in_seconds": expires_minutes * 60}
+    result = {"phone": payload.phone, "expires_in_seconds": expires_minutes * 60}
     if expose_debug_email_code():
         result["debug_code"] = code
     return result
@@ -270,43 +291,57 @@ async def register(
     storage: AppStorage = Depends(get_storage),
     runtime_services: Any = Depends(get_runtime_services),
 ) -> dict[str, Any]:
-    email_key = hashlib.sha256(payload.email.lower().encode("utf-8")).hexdigest()
-    if not is_supported_registration_email(payload.email):
-        raise_error(status.HTTP_400_BAD_REQUEST, "EMAIL_DOMAIN_UNSUPPORTED", "娉ㄥ唽閭浠呮敮鎸?QQ 閭鍜岀綉鏄撻偖绠便€?")
-    if runtime_services.hit_rate_limit(f"rate:register:{email_key}", limit=5, window_seconds=3600):
+    phone_key = hashlib.sha256(payload.phone.encode("utf-8")).hexdigest()
+    if runtime_services.hit_rate_limit(f"rate:register:{phone_key}", limit=5, window_seconds=3600):
         raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "REGISTER_RATE_LIMITED", "娉ㄥ唽璇锋眰杩囦簬棰戠箒銆?")
     user_id = new_id()
     access_token = secrets.token_urlsafe(32)
     try:
-        with runtime_services.lock(f"lock:register:{email_key}", ttl_seconds=30):
+        with runtime_services.lock(f"lock:register:{phone_key}", ttl_seconds=30):
             with storage.connect() as connection:
                 verification = row_to_dict(
                     connection.execute(
                         """
-                        SELECT * FROM email_verification_codes
-                        WHERE email = ? AND purpose = 'register' AND consumed_at IS NULL AND expires_at > ?
+                        SELECT * FROM phone_verification_codes
+                        WHERE phone = ? AND purpose = 'register' AND consumed_at IS NULL AND expires_at > ?
                         ORDER BY created_at DESC
                         LIMIT 1
                         """,
-                        (payload.email.lower(), utc_now()),
+                        (payload.phone, utc_now()),
                     ).fetchone()
                 )
                 if verification is None:
-                    raise_error(status.HTTP_400_BAD_REQUEST, "EMAIL_CODE_INVALID", "楠岃瘉鐮侀敊璇垨宸茶繃鏈熴€?")
+                    raise_error(status.HTTP_400_BAD_REQUEST, "PHONE_CODE_INVALID", "验证码错误或已过期。")
                 if not hmac.compare_digest(
-                    verification["code_hash"], hash_registration_code(payload.email, payload.verification_code)
+                    verification["code_hash"], hash_registration_code(payload.phone, payload.verification_code)
                 ):
                     connection.execute(
-                        "UPDATE email_verification_codes SET attempt_count = attempt_count + 1 WHERE id = ?",
+                        "UPDATE phone_verification_codes SET attempt_count = attempt_count + 1 WHERE id = ?",
                         (verification["id"],),
                     )
-                    raise_error(status.HTTP_400_BAD_REQUEST, "EMAIL_CODE_INVALID", "楠岃瘉鐮侀敊璇垨宸茶繃鏈熴€?")
+                    raise_error(status.HTTP_400_BAD_REQUEST, "PHONE_CODE_INVALID", "验证码错误或已过期。")
+                invitation = active_invitation_code(connection, payload.invitation_code)
+                if invitation is None:
+                    raise_error(status.HTTP_400_BAD_REQUEST, "INVITATION_CODE_INVALID", "邀请码不存在或未启用。")
+                email_value = payload.email or f"{payload.phone}@phone.local"
                 connection.execute(
                     """
-                    INSERT INTO users (id, email, email_normalized, username, password_hash, status, email_verified_at)
-                    VALUES (?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
+                    INSERT INTO users
+                        (id, email, email_normalized, phone, phone_normalized, username, password_hash,
+                         status, email_verified_at, phone_verified_at, invitation_code_id, invitation_code)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?)
                     """,
-                    (user_id, payload.email.lower(), payload.email.lower(), payload.username, hash_password(payload.password)),
+                    (
+                        user_id,
+                        email_value,
+                        email_value.lower(),
+                        payload.phone,
+                        payload.phone,
+                        payload.username,
+                        hash_password(payload.password),
+                        invitation["id"],
+                        invitation["code"],
+                    ),
                 )
                 connection.execute(
                     """
@@ -316,16 +351,24 @@ async def register(
                     (user_id, payload.username),
                 )
                 connection.execute(
-                    "UPDATE email_verification_codes SET consumed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    "UPDATE phone_verification_codes SET consumed_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (verification["id"],),
+                )
+                connection.execute(
+                    """
+                    UPDATE invitation_codes
+                    SET use_count = use_count + 1, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (invitation["id"],),
                 )
                 create_access_session(connection, token=access_token, user_id=user_id)
                 refresh_token = create_refresh_session(connection, user_id=user_id, request=request)
     except Exception as exc:
         if str(exc).startswith("LOCK_BUSY"):
-            raise_error(status.HTTP_409_CONFLICT, "REGISTER_IN_PROGRESS", "璇ラ偖绠辨鍦ㄥ鐞嗘敞鍐岃姹傘€?")
+            raise_error(status.HTTP_409_CONFLICT, "REGISTER_IN_PROGRESS", "该手机号正在处理注册请求。")
         if "UNIQUE" in str(exc).upper():
-            raise_error(status.HTTP_409_CONFLICT, "EMAIL_ALREADY_REGISTERED", "璇ラ偖绠卞凡缁忔敞鍐屻€?")
+            raise_error(status.HTTP_409_CONFLICT, "PHONE_ALREADY_REGISTERED", "该手机号已经注册。")
         raise
     set_refresh_cookie(response, refresh_token)
     return {
@@ -334,11 +377,14 @@ async def register(
         "user": public_user(
             {
                 "id": user_id,
-                "email": payload.email.lower(),
+                "email": payload.email or f"{payload.phone}@phone.local",
+                "phone": payload.phone,
                 "username": payload.username,
                 "role": "user",
                 "status": "active",
                 "email_verified_at": utc_now(),
+                "phone_verified_at": utc_now(),
+                "invitation_code": payload.invitation_code,
             }
         ),
     }
@@ -352,22 +398,22 @@ async def login(
     storage: AppStorage = Depends(get_storage),
     runtime_services: Any = Depends(get_runtime_services),
 ) -> dict[str, Any]:
-    email_key = hashlib.sha256(payload.email.lower().encode("utf-8")).hexdigest()
+    phone_key = hashlib.sha256(payload.phone.encode("utf-8")).hexdigest()
     client_ip = request.client.host if request.client else "unknown"
-    if runtime_services.hit_rate_limit(f"rate:login:email:{email_key}", limit=10, window_seconds=900):
+    if runtime_services.hit_rate_limit(f"rate:login:phone:{phone_key}", limit=10, window_seconds=900):
         raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "LOGIN_RATE_LIMITED", "鐧诲綍灏濊瘯杩囦簬棰戠箒銆?")
     if runtime_services.hit_rate_limit(f"rate:login:ip:{client_ip}", limit=50, window_seconds=900):
         raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "LOGIN_RATE_LIMITED", "鐧诲綍灏濊瘯杩囦簬棰戠箒銆?")
     with storage.connect() as connection:
         row = connection.execute(
-            "SELECT * FROM users WHERE email_normalized = ? OR email = ?",
-            (payload.email.lower(), payload.email.lower()),
+            "SELECT * FROM users WHERE phone_normalized = ? OR phone = ?",
+            (payload.phone, payload.phone),
         ).fetchone()
         user = row_to_dict(row)
         if user is None or not verify_password(payload.password, user["password_hash"]):
-            raise_error(status.HTTP_401_UNAUTHORIZED, "INVALID_CREDENTIALS", "閭鎴栧瘑鐮侀敊璇€?")
-        if user.get("status") != "active" or not user.get("email_verified_at"):
-            raise_error(status.HTTP_403_FORBIDDEN, "EMAIL_NOT_VERIFIED", "閭楠岃瘉鍚庢墠鑳界櫥褰曘€?")
+            raise_error(status.HTTP_401_UNAUTHORIZED, "INVALID_CREDENTIALS", "手机号或密码错误。")
+        if user.get("status") != "active" or not user.get("phone_verified_at"):
+            raise_error(status.HTTP_403_FORBIDDEN, "PHONE_NOT_VERIFIED", "手机号验证后才能登录。")
         token = create_access_session(connection, user_id=user["id"])
         refresh_token = create_refresh_session(connection, user_id=user["id"], request=request)
     set_refresh_cookie(response, refresh_token)
@@ -380,47 +426,45 @@ async def send_password_reset_code(
     storage: AppStorage = Depends(get_storage),
     runtime_services: Any = Depends(get_runtime_services),
 ) -> dict[str, Any]:
-    email_key = hashlib.sha256(payload.email.lower().encode("utf-8")).hexdigest()
-    if not is_supported_registration_email(payload.email):
-        raise_error(status.HTTP_400_BAD_REQUEST, "EMAIL_DOMAIN_UNSUPPORTED", "Email domain is not supported.")
-    if runtime_services.hit_rate_limit(f"rate:password-reset-code:{email_key}", limit=5, window_seconds=3600):
-        raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "EMAIL_CODE_RATE_LIMITED", "Password reset code requested too often.")
+    phone_key = hashlib.sha256(payload.phone.encode("utf-8")).hexdigest()
+    if runtime_services.hit_rate_limit(f"rate:password-reset-code:{phone_key}", limit=5, window_seconds=3600):
+        raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "PHONE_CODE_RATE_LIMITED", "Password reset code requested too often.")
 
     code = f"{secrets.randbelow(1_000_000):06d}"
     expires_minutes = registration_code_expire_minutes()
-    result = {"email": payload.email.lower(), "expires_in_seconds": expires_minutes * 60}
+    result = {"phone": payload.phone, "expires_in_seconds": expires_minutes * 60}
     try:
-        with runtime_services.lock(f"lock:password-reset:{email_key}", ttl_seconds=30):
+        with runtime_services.lock(f"lock:password-reset:{phone_key}", ttl_seconds=30):
             with storage.connect() as connection:
                 user = connection.execute(
-                    "SELECT id FROM users WHERE email_normalized = ? OR email = ?",
-                    (payload.email.lower(), payload.email.lower()),
+                    "SELECT id FROM users WHERE phone_normalized = ? OR phone = ?",
+                    (payload.phone, payload.phone),
                 ).fetchone()
                 if user is None:
                     return result
                 connection.execute(
                     """
-                    UPDATE email_verification_codes
+                    UPDATE phone_verification_codes
                     SET consumed_at = CURRENT_TIMESTAMP
-                    WHERE email = ? AND purpose = 'password_reset' AND consumed_at IS NULL
+                    WHERE phone = ? AND purpose = 'password_reset' AND consumed_at IS NULL
                     """,
-                    (payload.email.lower(),),
+                    (payload.phone,),
                 )
                 connection.execute(
                     """
-                    INSERT INTO email_verification_codes (id, email, code_hash, purpose, expires_at)
+                    INSERT INTO phone_verification_codes (id, phone, code_hash, purpose, expires_at)
                     VALUES (?, ?, ?, 'password_reset', ?)
                     """,
                     (
                         new_id(),
-                        payload.email.lower(),
-                        hash_password_reset_code(payload.email, code),
+                        payload.phone,
+                        hash_password_reset_code(payload.phone, code),
                         utc_after(minutes=expires_minutes),
                     ),
                 )
-        send_registration_code_email(payload.email, code, expires_minutes=expires_minutes, purpose="password_reset")
-    except EmailNotConfigured:
-        raise_error(status.HTTP_503_SERVICE_UNAVAILABLE, "SMTP_NOT_CONFIGURED", "Email service is not configured.")
+        send_registration_code_sms(payload.phone, code, expires_minutes=expires_minutes, purpose="password_reset")
+    except SmsNotConfigured:
+        raise_error(status.HTTP_503_SERVICE_UNAVAILABLE, "SMS_NOT_CONFIGURED", "SMS service is not configured.")
     except Exception as exc:
         if str(exc).startswith("LOCK_BUSY"):
             raise_error(status.HTTP_409_CONFLICT, "PASSWORD_RESET_IN_PROGRESS", "Password reset is already in progress.")
@@ -436,44 +480,42 @@ async def reset_password(
     payload: PasswordResetPayload,
     storage: AppStorage = Depends(get_storage),
 ) -> dict[str, str]:
-    if not is_supported_registration_email(payload.email):
-        raise_error(status.HTTP_400_BAD_REQUEST, "EMAIL_DOMAIN_UNSUPPORTED", "Email domain is not supported.")
     with storage.connect() as connection:
         user = row_to_dict(
             connection.execute(
-                "SELECT * FROM users WHERE email_normalized = ? OR email = ?",
-                (payload.email.lower(), payload.email.lower()),
+                "SELECT * FROM users WHERE phone_normalized = ? OR phone = ?",
+                (payload.phone, payload.phone),
             ).fetchone()
         )
         if user is None:
-            raise_error(status.HTTP_400_BAD_REQUEST, "EMAIL_CODE_INVALID", "Password reset code is invalid or expired.")
+            raise_error(status.HTTP_400_BAD_REQUEST, "PHONE_CODE_INVALID", "Password reset code is invalid or expired.")
         verification = row_to_dict(
             connection.execute(
                 """
-                SELECT * FROM email_verification_codes
-                WHERE email = ? AND purpose = 'password_reset' AND consumed_at IS NULL AND expires_at > ?
+                SELECT * FROM phone_verification_codes
+                WHERE phone = ? AND purpose = 'password_reset' AND consumed_at IS NULL AND expires_at > ?
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
-                (payload.email.lower(), utc_now()),
+                (payload.phone, utc_now()),
             ).fetchone()
         )
         if verification is None:
-            raise_error(status.HTTP_400_BAD_REQUEST, "EMAIL_CODE_INVALID", "Password reset code is invalid or expired.")
+            raise_error(status.HTTP_400_BAD_REQUEST, "PHONE_CODE_INVALID", "Password reset code is invalid or expired.")
         if not hmac.compare_digest(
-            verification["code_hash"], hash_password_reset_code(payload.email, payload.verification_code)
+            verification["code_hash"], hash_password_reset_code(payload.phone, payload.verification_code)
         ):
             connection.execute(
-                "UPDATE email_verification_codes SET attempt_count = attempt_count + 1 WHERE id = ?",
+                "UPDATE phone_verification_codes SET attempt_count = attempt_count + 1 WHERE id = ?",
                 (verification["id"],),
             )
-            raise_error(status.HTTP_400_BAD_REQUEST, "EMAIL_CODE_INVALID", "Password reset code is invalid or expired.")
+            raise_error(status.HTTP_400_BAD_REQUEST, "PHONE_CODE_INVALID", "Password reset code is invalid or expired.")
         connection.execute(
             "UPDATE users SET password_hash = ? WHERE id = ?",
             (hash_password(payload.new_password), user["id"]),
         )
         connection.execute(
-            "UPDATE email_verification_codes SET consumed_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE phone_verification_codes SET consumed_at = CURRENT_TIMESTAMP WHERE id = ?",
             (verification["id"],),
         )
         connection.execute(
@@ -481,7 +523,7 @@ async def reset_password(
             (user["id"],),
         )
         connection.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],))
-    return {"email": payload.email.lower(), "status": "password_reset"}
+    return {"phone": payload.phone, "status": "password_reset"}
 
 
 @router.post("/auth/refresh")
@@ -497,7 +539,7 @@ async def refresh_access_token(
         session = row_to_dict(
             connection.execute(
                 """
-                SELECT refresh_sessions.*, users.email, users.username, users.role, users.status, users.email_verified_at
+                SELECT refresh_sessions.*, users.email, users.phone, users.username, users.role, users.status, users.email_verified_at, users.phone_verified_at, users.invitation_code
                 FROM refresh_sessions
                 JOIN users ON users.id = refresh_sessions.user_id
                 WHERE refresh_sessions.refresh_token_hash = ?
@@ -893,7 +935,15 @@ async def list_gallery_outputs(
     storage: AppStorage = Depends(get_storage),
 ) -> dict[str, Any]:
     # Gallery history is account-scoped: every output row is filtered by the authenticated user's id.
-    rows = list_gallery_output_summaries(storage, user_id=user["id"], limit=limit + 1, cursor=cursor)
+    from app.api.single_image import list_gallery_single_image_output_summaries
+
+    product_rows = list_gallery_output_summaries(storage, user_id=user["id"], limit=limit + 1, cursor=cursor)
+    single_rows = list_gallery_single_image_output_summaries(storage, user_id=user["id"], limit=limit + 1, cursor=cursor)
+    rows = sorted(
+        [*product_rows, *single_rows],
+        key=lambda item: (item["created_at"], item["id"]),
+        reverse=True,
+    )
     items = rows[:limit]
     next_cursor = encode_gallery_cursor(items[-1]) if len(rows) > limit and items else None
     return {"items": items, "next_cursor": next_cursor}
@@ -948,10 +998,13 @@ def public_user(user: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": user["id"],
         "email": user["email"],
+        "phone": user.get("phone", ""),
         "username": user.get("username", ""),
         "role": user.get("role", "user"),
         "status": user.get("status", "active"),
         "email_verified": bool(user.get("email_verified_at")),
+        "phone_verified": bool(user.get("phone_verified_at")),
+        "invitation_code": user.get("invitation_code", ""),
     }
 
 
@@ -1017,6 +1070,23 @@ def hash_password_reset_code(email: str, code: str) -> str:
 
 def hash_email_code(email: str, code: str, *, purpose: str) -> str:
     return hash_token(f"{email.lower()}:{code.strip()}:{purpose}")
+
+
+def normalize_phone(value: str) -> str:
+    return value.strip().replace(" ", "").replace("-", "")
+
+
+def is_valid_phone(phone: str) -> bool:
+    return phone.isdigit() and 6 <= len(phone) <= 20
+
+
+def active_invitation_code(connection: Any, code: str) -> dict[str, Any] | None:
+    return row_to_dict(
+        connection.execute(
+            "SELECT * FROM invitation_codes WHERE code = ? AND is_enabled = 1",
+            (code.strip().upper(),),
+        ).fetchone()
+    )
 
 
 def is_supported_registration_email(email: str) -> bool:
@@ -1248,6 +1318,7 @@ def execute_claimed_generation_job(*, job_id: str, storage: AppStorage, runtime_
         runtime_services.delete_cache(gallery_cache_key(user["id"]))
         return True
 
+    completed_without_quality_errors = False
     with storage.connect() as connection:
         failed_quality_messages: list[str] = []
         for image in generated:
@@ -1286,6 +1357,25 @@ def execute_claimed_generation_job(*, job_id: str, storage: AppStorage, runtime_
             )
             connection.execute("UPDATE projects SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (project["id"],))
         else:
+            completed_without_quality_errors = True
+        output_count = int(
+            connection.execute(
+                "SELECT COUNT(*) AS count FROM generation_outputs WHERE job_id = ? AND user_id = ?",
+                (job_id, user["id"]),
+            ).fetchone()["count"]
+        )
+
+    if completed_without_quality_errors and output_count >= len(OUTPUT_SPECS):
+        charge_generation_hold(storage, user_id=user["id"], job_id=job_id)
+    else:
+        release_generation_hold(
+            storage,
+            user_id=user["id"],
+            job_id=job_id,
+            remark="Generation failed quality gates or produced too few outputs; reserved points released.",
+        )
+    if completed_without_quality_errors:
+        with storage.connect() as connection:
             connection.execute(
                 """
                 UPDATE generation_jobs
@@ -1298,23 +1388,6 @@ def execute_claimed_generation_job(*, job_id: str, storage: AppStorage, runtime_
                 (job_id, user["id"]),
             )
             connection.execute("UPDATE projects SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (project["id"],))
-        output_count = int(
-            connection.execute(
-                "SELECT COUNT(*) AS count FROM generation_outputs WHERE job_id = ? AND user_id = ?",
-                (job_id, user["id"]),
-            ).fetchone()["count"]
-        )
-
-    job_payload = get_job_payload(storage, job_id, user["id"])
-    if job_payload["status"] == "completed" and output_count >= len(OUTPUT_SPECS):
-        charge_generation_hold(storage, user_id=user["id"], job_id=job_id)
-    else:
-        release_generation_hold(
-            storage,
-            user_id=user["id"],
-            job_id=job_id,
-            remark="Generation failed quality gates or produced too few outputs; reserved points released.",
-        )
 
     runtime_services.delete_cache(gallery_cache_key(user["id"]))
     return True
@@ -1799,6 +1872,7 @@ def list_outputs(
 
 def output_payload(row: dict[str, Any]) -> dict[str, Any]:
     output_id = row["id"]
+    row["source"] = "product_generation"
     row["download_url"] = f"/api/v1/outputs/{output_id}/download"
     row["thumbnail_url"] = f"/api/v1/outputs/{output_id}/thumbnail"
     return row

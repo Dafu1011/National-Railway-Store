@@ -62,4 +62,25 @@ describe("generation payload", () => {
 
     expect(payload.detail_config).toEqual({});
   });
+
+  it("sends product logo switch and product volume as real backend parameters", () => {
+    const payload = buildProjectCreatePayload(
+      {
+        name: "智枫扫地车",
+        companyName: "智枫科技",
+        manufacturerName: "智枫生产厂家",
+        manufacturerAddress: "浙江省杭州市西湖区智枫路88号",
+        productionDate: "2026-07-27",
+        inspector: "QC-01",
+        barcodeType: "EAN_13",
+        productLogoEnabled: true,
+        productVolume: "large",
+      },
+      "product-id",
+      "6903244675147",
+    );
+
+    expect(payload.style_config).toMatchObject({ product_logo_enabled: true });
+    expect(payload.certificate_config).toMatchObject({ product_volume: "large" });
+  });
 });

@@ -69,6 +69,24 @@ class KeleGptImage2Provider:
                 self._retry_sleep(_retry_delay_seconds(error, self._retry_base_delay_seconds, attempt, exc))
         raise RuntimeError("KELE_RETRY_EXHAUSTED")
 
+    def generate_image(self, *, prompt: str, size: str) -> bytes:
+        self._validate_config()
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                response = self._get_client().images.generate(
+                    model=self.config.model,
+                    prompt=prompt,
+                    size=size,
+                    n=1,
+                )
+                return decode_image_response(response, self._url_fetcher, self.config.timeout_seconds)
+            except Exception as exc:
+                error = _normalize_provider_exception(exc)
+                if attempt >= self._max_attempts or not _is_retryable_provider_error(str(error)):
+                    raise error from exc
+                self._retry_sleep(_retry_delay_seconds(error, self._retry_base_delay_seconds, attempt, exc))
+        raise RuntimeError("KELE_RETRY_EXHAUSTED")
+
     def _create_image(self, *, prompt: str, size: str, image_paths: list[Any]) -> Any:
         with ExitStack() as stack:
             image_files = [stack.enter_context(Path(path).open("rb")) for path in image_paths]

@@ -137,7 +137,15 @@ def recharge_account(
     return account_payload(account, user=target_user, next_lot=next_lot)
 
 
-def reserve_generation_charge(storage: AppStorage, *, user: dict[str, Any], job_id: str) -> None:
+def reserve_generation_charge(
+    storage: AppStorage,
+    *,
+    user: dict[str, Any],
+    job_id: str,
+    points: int = GENERATION_CHARGE_POINTS,
+) -> None:
+    if points <= 0:
+        raise ValueError("points must be positive")
     with storage.connect() as connection:
         ensure_user_account(connection, user_id=user["id"], username=user.get("username", ""))
         refresh_expired_points(connection, user_id=user["id"])
@@ -150,22 +158,22 @@ def reserve_generation_charge(storage: AppStorage, *, user: dict[str, Any], job_
             SET reserved_points = reserved_points + ?, updated_at = CURRENT_TIMESTAMP
             WHERE user_id = ? AND (balance_points - reserved_points) >= ?
             """,
-            (GENERATION_CHARGE_POINTS, user["id"], GENERATION_CHARGE_POINTS),
+            (points, user["id"], points),
         )
         if updated.rowcount != 1:
             account = row_to_dict(connection.execute("SELECT * FROM user_accounts WHERE user_id = ?", (user["id"],)).fetchone())
             available_points = int(account["balance_points"]) - int(account["reserved_points"]) if account else 0
-            raise InsufficientBalance(required_points=GENERATION_CHARGE_POINTS, available_points=available_points)
+            raise InsufficientBalance(required_points=points, available_points=available_points)
         connection.execute(
             """
             INSERT INTO generation_billing_holds (id, user_id, job_id, points, status)
             VALUES (?, ?, ?, ?, 'reserved')
             """,
-            (new_id(), user["id"], job_id, GENERATION_CHARGE_POINTS),
+            (new_id(), user["id"], job_id, points),
         )
 
 
-def charge_generation_hold(storage: AppStorage, *, user_id: str, job_id: str) -> None:
+def charge_generation_hold(storage: AppStorage, *, user_id: str, job_id: str, remark: str = "生成5张图片扣费") -> None:
     with storage.connect() as connection:
         hold = reserved_hold(connection, user_id=user_id, job_id=job_id)
         if hold is None:
@@ -198,7 +206,7 @@ def charge_generation_hold(storage: AppStorage, *, user_id: str, job_id: str) ->
             points=-points_to_charge,
             balance_after=balance_after,
             related_job_id=job_id,
-            remark="生成5张图片扣费",
+            remark=remark,
         )
 
 
@@ -340,6 +348,7 @@ def account_payload(
         "user": {
             "id": user["id"],
             "email": user.get("email", ""),
+            "phone": user.get("phone", ""),
             "username": user.get("username", account.get("username_snapshot", "")),
         },
         "username": user.get("username", account.get("username_snapshot", "")),

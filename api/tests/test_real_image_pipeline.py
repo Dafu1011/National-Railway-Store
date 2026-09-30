@@ -24,7 +24,7 @@ from app.providers.real_image import (
 
 class RealImagePipelinePromptTests(unittest.TestCase):
 
-    def test_package_prompt_renders_brand_value_as_large_standalone_text_without_brand_label(self):
+    def test_package_prompt_renders_brand_value_as_smaller_standalone_text_without_brand_label(self):
         product = {
             "name": "????",
             "brand": "??",
@@ -36,8 +36,10 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         prompt = _prompt_for("package", product, project)
 
         self.assertIn("brand value only", prompt)
-        self.assertIn("large standalone brand wordmark", prompt)
-        self.assertIn("large standard printed Chinese brand text", prompt)
+        self.assertIn("standalone brand wordmark", prompt)
+        self.assertIn("brand font must be half the previous large wordmark size", prompt)
+        self.assertIn("brand or logo visual area must be about 5% of the visible package front", prompt)
+        self.assertIn("standard printed Chinese brand text", prompt)
         self.assertIn("character correctness and complete stroke structure are more important than sharpness", prompt)
         self.assertIn("slight softness or mild ink blur is acceptable", prompt)
         self.assertIn("not artistic typography", prompt)
@@ -61,6 +63,9 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("not calligraphy", prompts[0])
         self.assertNotIn("large artistic brand wordmark", prompts[0])
         self.assertIn("brand: ??", prompts[0])
+        self.assertIn("ecommerce promotional hero section", prompts[0])
+        self.assertIn("not a plain product-only cutout", prompts[0])
+        self.assertIn("marketing text callouts", prompts[0])
         for prompt in prompts[1:]:
             with self.subTest(prompt=prompt):
                 self.assertNotIn("brand: ??", prompt)
@@ -93,7 +98,35 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertLessEqual(len(_prompt_for("certificate", product, project)), 6500)
         self.assertLessEqual(len(_prompt_for("package", product, project)), 24000)
         for prompt in _detail_module_prompts(product):
-            self.assertLessEqual(len(prompt), 5000)
+            self.assertLessEqual(len(prompt), 8500)
+
+    def test_real_image_prompts_stay_compact_after_rule_preserving_optimization(self):
+        product = {
+            "name": "手推式扫雪机",
+            "brand": "星锐月恒",
+            "model": "6.5马力",
+            "category": "大型清洁机械",
+        }
+        project = {
+            "barcode_type": "EAN_13",
+            "barcode_value": "6979051758366",
+            "has_certificate_reference": True,
+            "has_package_reference": True,
+            "certificate_config": {
+                "production_date": "2026-09-01",
+                "inspector": "QC-01",
+                "manufacturer_name": "吉林省军达铁洛机械车辆配件有限公司",
+                "manufacturer_address": "吉林省长春市二道区经纬南路7094号",
+            },
+            "package_config": {
+                "manufacturer_name": "吉林省军达铁洛机械车辆配件有限公司",
+                "manufacturer_address": "吉林省长春市二道区经纬南路7094号",
+            },
+        }
+
+        self.assertLessEqual(len(_prompt_for("package", product, project)), 20500)
+        for prompt in _detail_module_prompts(product):
+            self.assertLessEqual(len(prompt), 8500)
 
     def test_large_product_certificate_prompt_stays_compact_for_timeout_stability(self):
         product = {
@@ -116,7 +149,7 @@ class RealImagePipelinePromptTests(unittest.TestCase):
 
         prompt = _prompt_for("certificate", product, project)
 
-        self.assertLessEqual(len(prompt), 5000)
+        self.assertLessEqual(len(prompt), 5400)
         self.assertIn("certificate about half the previous foreground visual size", prompt)
         self.assertIn("show about one third of the large product", prompt)
         self.assertIn("place the certificate on top of the large product", prompt)
@@ -139,6 +172,85 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("must show a cropped close partial view", prompt)
         self.assertIn("Do not show the full product", prompt)
         self.assertNotIn("Small products should remain fully visible when possible", prompt)
+
+    def test_certificate_size_mode_uses_project_product_volume_not_product_name_guess(self):
+        small_prompt = _prompt_for(
+            "certificate",
+            {"name": "手推式扫雪机", "brand": "星锐月恒", "model": "6.5马力", "category": "大型清洁机械"},
+            {"certificate_config": {"product_volume": "small"}},
+        )
+        large_prompt = _prompt_for(
+            "certificate",
+            {"name": "智枫保温杯", "brand": "智枫", "model": "ZF-800", "category": "杯"},
+            {"certificate_config": {"product_volume": "large"}},
+        )
+
+        self.assertIn("Small-product certificate composition is active", small_prompt)
+        self.assertNotIn("Large-product certificate composition is active", small_prompt)
+        self.assertIn("Large-product certificate composition is active", large_prompt)
+        self.assertNotIn("Small-product certificate composition is active", large_prompt)
+
+    def test_large_product_package_prompt_generates_package_only(self):
+        prompt = _prompt_for(
+            "package",
+            {"name": "手推式扫雪机", "brand": "星锐月恒", "model": "6.5马力", "category": "大型清洁机械"},
+            {
+                "certificate_config": {"product_volume": "large"},
+                "barcode_type": "EAN_13",
+                "barcode_value": "6979051758366",
+            },
+        )
+
+        self.assertIn("Large-product package-only mode is active", prompt)
+        self.assertIn("generate only one realistic retail shipping or sales package box", prompt)
+        self.assertIn("Do not render the product itself anywhere in the image", prompt)
+        self.assertIn("no product beside the package", prompt)
+        self.assertIn("must not show the product body as a photo, illustration, silhouette, or cutaway", prompt)
+        self.assertIn("no visible product", prompt)
+        self.assertNotIn("product-and-package co-photo", prompt)
+        self.assertNotIn("product near it on the right-side tabletop", prompt)
+        self.assertNotIn("product physical resting pose", prompt)
+        self.assertNotIn("top of the product", prompt)
+        self.assertNotIn("Main-product reference hard constraint", prompt)
+
+    def test_small_product_package_prompt_keeps_product_and_package_cophoto(self):
+        prompt = _prompt_for(
+            "package",
+            {"name": "智枫保温杯", "brand": "智枫", "model": "ZF-800", "category": "杯"},
+            {
+                "certificate_config": {"product_volume": "small"},
+                "barcode_type": "EAN_13",
+                "barcode_value": "6903244675147",
+            },
+        )
+
+        self.assertIn("product-and-package co-photo", prompt)
+        self.assertIn("product near it on the right-side tabletop", prompt)
+        self.assertIn("Main-product reference hard constraint", prompt)
+        self.assertNotIn("Large-product package-only mode is active", prompt)
+
+    def test_main_prompt_uses_logo_fusion_only_when_enabled(self):
+        enabled_prompt = _prompt_for(
+            "main",
+            {"name": "智枫水杯", "brand": "智枫"},
+            {"style_config": {"product_logo_enabled": True}},
+        )
+        disabled_prompt = _prompt_for(
+            "main",
+            {"name": "智枫水杯", "brand": "智枫"},
+            {"style_config": {"product_logo_enabled": False}},
+        )
+
+        self.assertIn("Product-logo fusion hard constraint", enabled_prompt)
+        self.assertIn("independent from any top-left brand-corner logo", enabled_prompt)
+        self.assertIn("manufactured product-surface logo must appear on the product body", enabled_prompt)
+        self.assertIn("do not satisfy this requirement by placing a logo in the image corner", enabled_prompt)
+        self.assertIn("The product itself must carry the logo", enabled_prompt)
+        self.assertIn("Product-surface logo is the primary requirement", enabled_prompt)
+        self.assertIn("brand-corner logo does not satisfy product_logo_enabled", enabled_prompt)
+        self.assertIn("not directly pasted on afterward", enabled_prompt)
+        self.assertIn("about 5% of the total visible product area", enabled_prompt)
+        self.assertNotIn("Product-logo fusion hard constraint", disabled_prompt)
 
     def test_certificate_prompt_starts_with_hard_large_product_mode_for_vehicle_like_names(self):
         prompt = _prompt_for(
@@ -922,7 +1034,7 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertEqual(shadow_pixel, (222, 222, 220))
         self.assertEqual(red_pixels, 0)
 
-    def test_optional_logo_is_sent_only_to_main_image_and_appended_to_prompt(self):
+    def test_uploaded_logo_is_sent_to_main_image_even_when_product_logo_switch_is_disabled(self):
         calls = []
 
         class FakeProvider:
@@ -945,16 +1057,121 @@ class RealImagePipelinePromptTests(unittest.TestCase):
                 output_dir=Path(tmp),
                 job_id="job",
                 product=product,
-                project={},
+                project={"style_config": {"product_logo_enabled": False}},
                 source_image_path=source,
                 reference_image_paths={"logo": logo},
             )
 
         main_prompt, main_paths = calls[0]
         self.assertEqual(main_paths, [source, logo])
-        self.assertIn("upper-left corner", main_prompt)
-        for prompt, image_paths in (*calls[1:3], calls[-1]):
+        self.assertIn("top-left corner of the main image", main_prompt)
+        self.assertIn("brand logo reference image is provided as the second image", main_prompt)
+        self.assertIn("Mandatory brand-corner logo requirement", main_prompt)
+        self.assertIn("must appear in the top-left corner", main_prompt)
+        self.assertIn("must not be omitted, hidden, cropped, faded, blurred, merged into the background, or moved away from the top-left corner", main_prompt)
+        self.assertIn("Keep clear margin from the top and left edges", main_prompt)
+        self.assertNotIn("Product-logo fusion hard constraint", main_prompt)
+
+        calls.clear()
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.png"
+            logo = Path(tmp) / "logo.png"
+            main_output = Path(tmp) / "job" / "main.png"
+            Image.new("RGB", (800, 800), "white").save(source)
+            Image.new("RGBA", (200, 200), (0, 0, 0, 0)).save(logo)
+            pipeline.generate_five_images(
+                output_dir=Path(tmp),
+                job_id="job",
+                product=product,
+                project={"style_config": {"product_logo_enabled": True}},
+                source_image_path=source,
+                reference_image_paths={"logo": logo},
+            )
+
+        main_prompt, main_paths = calls[0]
+        self.assertEqual(main_paths, [source, logo])
+        self.assertIn("top-left corner of the main image", main_prompt)
+        self.assertIn("Mandatory brand-corner logo requirement", main_prompt)
+        self.assertIn("must appear in the top-left corner", main_prompt)
+        self.assertIn("Product-logo fusion hard constraint", main_prompt)
+        self.assertIn("independent from any top-left brand-corner logo", main_prompt)
+        self.assertIn("manufactured product-surface logo must appear on the product body", main_prompt)
+        self.assertIn("The product itself must carry the logo", main_prompt)
+        self.assertIn("Product-surface logo is the primary requirement", main_prompt)
+        self.assertIn("brand-corner logo does not satisfy product_logo_enabled", main_prompt)
+        self.assertIn("not directly pasted on afterward", main_prompt)
+
+        second_pass_prompt, second_pass_paths = calls[1]
+        self.assertEqual(second_pass_paths, [main_output, logo])
+        self.assertIn("Mandatory product-surface logo second pass", second_pass_prompt)
+        self.assertIn("Edit the generated main product image", second_pass_prompt)
+        self.assertIn("about 5% of the total visible product area", second_pass_prompt)
+        self.assertIn("Do not add, move, remove, crop, or change the top-left brand-corner logo", second_pass_prompt)
+
+        for prompt, image_paths in (*calls[2:4], calls[-1]):
             self.assertNotIn(logo, image_paths)
+
+    def test_outputs_after_main_use_generated_main_image_as_product_reference(self):
+        calls = []
+
+        class FakeProvider:
+            def edit_image(self, *, prompt, size, image_paths):
+                calls.append((prompt, list(image_paths)))
+                buffer = BytesIO()
+                Image.new("RGB", (1024, 1024), "white").save(buffer, format="PNG")
+                return buffer.getvalue()
+
+        provider = FakeProvider()
+        pipeline = KeleFiveImagePipeline(provider)
+        product = {"name": "Consistent product", "brand": "Brand", "model": "ZF-MAIN"}
+
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.png"
+            Image.new("RGB", (800, 800), "white").save(source)
+            pipeline.generate_five_images(
+                output_dir=Path(tmp),
+                job_id="job",
+                product=product,
+                project={"style_config": {"product_logo_enabled": False}},
+                source_image_path=source,
+            )
+
+            main_output = Path(tmp) / "job" / "main.png"
+            self.assertTrue(main_output.exists())
+            self.assertEqual(calls[0][1], [source])
+            self.assertEqual(calls[1][1][0], main_output)
+            self.assertEqual(calls[2][1][0], main_output)
+            self.assertEqual(calls[3][1][0], main_output)
+            self.assertEqual(calls[4][1][0], main_output)
+            self.assertEqual(calls[5][1][0], main_output)
+            self.assertEqual(calls[6][1][0], main_output)
+            self.assertEqual(calls[7][1][0], main_output)
+            for prompt, _image_paths in calls[1:]:
+                self.assertIn("Ignore the standalone top-left brand logo from the main image", prompt)
+                self.assertIn("Do not render a standalone top-left brand logo", prompt)
+                self.assertIn("Main-product reference hard constraint", prompt)
+                self.assertIn("product-surface logo must match the generated main product image", prompt)
+
+    def test_all_non_main_prompts_require_main_product_surface_logo_consistency(self):
+        product = {
+            "name": "文件柜",
+            "brand": "智枫",
+            "model": "ZF-CAB-01",
+            "category": "办公家具",
+        }
+
+        for output_type in ("certificate", "package", "scene"):
+            with self.subTest(output_type=output_type):
+                prompt = _prompt_for(output_type, product, {"barcode_type": "EAN_13", "barcode_value": "6903244675147"})
+                self.assertIn("Main-product reference hard constraint", prompt)
+                self.assertIn("product-surface logo must match the generated main product image", prompt)
+                self.assertIn("Do not keep only a similar logo while changing the product body", prompt)
+
+        for prompt in _detail_module_prompts(product):
+            with self.subTest(prompt=prompt):
+                self.assertIn("Main-product reference hard constraint", prompt)
+                self.assertIn("product-surface logo must match the generated main product image", prompt)
+                self.assertIn("Do not keep only a similar logo while changing the product body", prompt)
 
     def test_certificate_generation_does_not_add_backend_qc_stamp_after_model_image(self):
         class FakeProvider:
@@ -1044,6 +1261,19 @@ class RealImagePipelinePromptTests(unittest.TestCase):
                 self.assertIn("same product style identity", prompt)
                 self.assertIn("Do not switch to a different SKU, package variant, colorway, flavor, label design, logo layout, cap shape, bottle shape, accessory set, or material finish", prompt)
 
+    def test_scene_prompt_requires_generated_main_product_identity_not_logo_only(self):
+        prompt = _prompt_for(
+            "scene",
+            {"name": "文件柜", "brand": "智枫", "model": "ZF-CAB-01", "category": "办公家具"},
+            {"barcode_type": "EAN_13", "barcode_value": "6903244675147"},
+        )
+
+        self.assertIn("provided product reference image", prompt)
+        self.assertIn("generated main product image when generating outputs after the main photo", prompt)
+        self.assertIn("Scene product identity hard constraint", prompt)
+        self.assertIn("must match the generated main product image", prompt)
+        self.assertIn("Do not keep only the logo while replacing, redesigning, recoloring, resizing, or simplifying the product body", prompt)
+
     def test_package_reference_style_must_be_adapted_to_current_product(self):
         prompt = _prompt_for(
             "package",
@@ -1130,6 +1360,34 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("If the visual source contains old or conflicting text, keep only the product appearance or package style", prompt)
         self.assertNotIn("If a user-entered value conflicts with the visible product category, structure, or appearance, omit that row", prompt)
 
+    def test_package_reference_prompt_preserves_uploaded_box_text_layout_positions(self):
+        prompt = _prompt_for(
+            "package",
+            {"name": "厚抹生乳茶", "brand": "别样泡泡", "model": "500ml×6瓶", "category": "食品饮料"},
+            {"has_package_reference": True, "barcode_type": "EAN_13", "barcode_value": "6903244675147"},
+        )
+
+        self.assertIn("Package reference text-layout hard constraint", prompt)
+        self.assertIn("preserve the uploaded package reference's text block positions", prompt)
+        self.assertIn("front/side panel assignment", prompt)
+        self.assertIn("brand zone, product-information zone, barcode zone", prompt)
+        self.assertIn("Replace old readable content only; do not move the text zones to another panel", prompt)
+        self.assertIn("do not center, restack, or invent a new package text layout", prompt)
+
+    def test_package_prompt_forbids_black_white_output_and_places_smaller_brand_upper_left(self):
+        prompt = _prompt_for(
+            "package",
+            {"name": "厚抹生乳茶", "brand": "别样泡泡", "model": "500ml×6瓶", "category": "食品饮料"},
+            {"has_package_reference": True, "barcode_type": "EAN_13", "barcode_value": "6903244675147"},
+        )
+
+        self.assertIn("Package color hard constraint", prompt)
+        self.assertIn("do not generate a black-and-white, grayscale, monochrome, or desaturated package image", prompt)
+        self.assertIn("full-color retail package", prompt)
+        self.assertIn("Package brand position and size hard constraint", prompt)
+        self.assertIn("place the standalone brand wordmark in the upper-left corner of the package front", prompt)
+        self.assertIn("brand font must be half the previous large wordmark size", prompt)
+
     def test_detail_module_prompts_preserve_logo_markings_and_scope_props_to_non_scene_modules(self):
         prompts = _detail_module_prompts(
             {
@@ -1152,14 +1410,22 @@ class RealImagePipelinePromptTests(unittest.TestCase):
                     self.assertIn("exactly two aligned real-world usage scenes", prompt)
                     self.assertIn("genuinely different real camera moments", prompt)
                     self.assertIn("realistic usage environments", prompt)
+                    self.assertNotIn("product dominant", prompt)
+                    self.assertNotIn("Scene 1 locked: core job, clear goal, visible product", prompt)
+                    self.assertNotIn("exact uploaded product", prompt)
                     self.assertNotIn("no lifestyle environment", prompt)
                     self.assertNotIn("no laptop, no books, no pen, no plant", prompt)
+                elif index == 0:
+                    self.assertIn("ecommerce promotional hero section", prompt)
+                    self.assertIn("not a plain product-only cutout", prompt)
+                    self.assertNotIn("usage scene", prompt)
                 else:
                     self.assertIn("plain white or very light neutral background", prompt)
                     self.assertIn("no laptop, no books, no pen, no plant", prompt)
+                    self.assertIn("generic product detail feature display section", prompt)
                     self.assertNotIn("usage scene", prompt)
 
-    def test_detail_module_prompts_generate_usage_scenes_from_uploaded_product_not_hardcoded_slots(self):
+    def test_detail_module_prompts_use_one_fixed_usage_scene_plan_from_product_facts(self):
         prompts = _detail_module_prompts(
             {
                 "name": "四轮扫雪车",
@@ -1171,9 +1437,13 @@ class RealImagePipelinePromptTests(unittest.TestCase):
 
         for prompt in prompts[1:3]:
             with self.subTest(prompt=prompt):
-                self.assertIn("Infer four real usage scenarios from the uploaded product itself", prompt)
-                self.assertIn("do not use preset scene categories or a fixed template", prompt)
-                self.assertIn("Each scenario must show a genuinely different real use of this exact uploaded product", prompt)
+                self.assertIn("Fixed four-scene usage plan derived once before image generation", prompt)
+                self.assertIn("Product facts used for this locked plan", prompt)
+                self.assertIn("Do not reinterpret, rename, merge, swap, or regenerate these four scenes later", prompt)
+                self.assertIn("Scene 1 locked", prompt)
+                self.assertIn("Scene 2 locked", prompt)
+                self.assertIn("Scene 3 locked", prompt)
+                self.assertIn("Scene 4 locked", prompt)
                 self.assertNotIn("equipment operating in its normal worksite or field environment", prompt)
                 self.assertNotIn("transport, loading, or roadside deployment", prompt)
                 self.assertNotIn("maintenance, inspection, or service-bay moment", prompt)
@@ -1214,6 +1484,77 @@ class RealImagePipelinePromptTests(unittest.TestCase):
             with self.subTest(prompt=prompt):
                 self.assertIn("The four scenes must be mutually exclusive", prompt)
                 self.assertIn("Do not reuse the same environment, props, action, camera angle, composition, lighting, caption, or background with small changes", prompt)
+                self.assertIn("Use only the locked scene descriptions listed above", prompt)
+
+    def test_detail_usage_scene_prompts_hard_require_product_fit_and_complete_scene_uniqueness(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "折叠露营桌",
+                "brand": "山野集",
+                "model": "ZY-CAMP-120",
+                "category": "户外用品",
+            }
+        )
+
+        for prompt in prompts[1:3]:
+            with self.subTest(prompt=prompt):
+                self.assertIn("Usage-scene fit hard constraint", prompt)
+                self.assertIn("real primary-use situation for this product category and product information", prompt)
+                self.assertIn("do not force the product itself to appear", prompt)
+                self.assertIn("Environment-first scene rule", prompt)
+                self.assertIn("main subject of each scene should be the realistic place", prompt)
+                self.assertIn("Product absence hard constraint", prompt)
+                self.assertIn("Do not render the product itself in usage-scene panels", prompt)
+                self.assertIn("show only the realistic environment where the product could reasonably be used", prompt)
+                self.assertIn("Usage scenes are environment-context images, not product display images", prompt)
+                self.assertIn("Do not center, enlarge, or hero-render the product", prompt)
+                self.assertIn("使用场景图以真实使用环境为主", prompt)
+                self.assertIn("no generic lifestyle, decorative display, storage, prep, maintenance, repair, cleaning, packaging, or unrelated scene", prompt)
+                self.assertIn("Four-scene uniqueness hard constraint", prompt)
+                self.assertIn("Scene 1, Scene 2, Scene 3, and Scene 4 must be completely different use cases", prompt)
+                self.assertIn("Duplicate-scene absolute ban", prompt)
+                self.assertIn("No two scenes may share the same place type, room type, institution type, user group, activity purpose, environment category, visible props, furniture, tools, vehicles, landscape elements, architectural elements, signage style, or background objects", prompt)
+                self.assertIn("If two scenes could receive the same short caption or the same environment label, regenerate one of them", prompt)
+                self.assertIn("Difference-scale hard constraint", prompt)
+                self.assertIn("indoor/outdoor status, public/private context, camera distance, lens feel, lighting color temperature, time of day, color palette, and render style must be different", prompt)
+                self.assertIn("user goal, environment, props, user action, camera angle, composition, lighting, background, and caption wording", prompt)
+                self.assertNotIn("学校", prompt)
+                self.assertNotIn("办公室", prompt)
+                self.assertNotIn("文件柜", prompt)
+
+    def test_detail_usage_scene_prompts_group_all_required_scene_hard_constraints(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "折叠露营桌",
+                "brand": "山野集",
+                "model": "ZY-CAMP-120",
+                "category": "户外用品",
+            }
+        )
+
+        for prompt in prompts[1:3]:
+            with self.subTest(prompt=prompt):
+                self.assertIn("Detail usage-scene hard constraints", prompt)
+                self.assertIn("product-fit, complete four-scene uniqueness, identical caption style, and different caption text are mandatory", prompt)
+                self.assertIn("Usage-scene fit hard constraint", prompt)
+                self.assertIn("Four-scene uniqueness hard constraint", prompt)
+                self.assertIn("Caption style hard constraint", prompt)
+
+    def test_detail_usage_scene_prompts_limit_shared_elements_to_ten_percent(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "折叠露营桌",
+                "brand": "山野集",
+                "model": "ZY-CAMP-120",
+                "category": "户外用品",
+            }
+        )
+
+        for prompt in prompts[1:3]:
+            with self.subTest(prompt=prompt):
+                self.assertIn("Shared-element limit hard constraint", prompt)
+                self.assertIn("any two scenes may share at most 10% of visible elements", prompt)
+                self.assertIn("at least 90% of environment, props, action, camera angle, composition, lighting, background, and caption wording must differ", prompt)
 
     def test_detail_usage_scene_modules_share_one_product_specific_scene_plan(self):
         prompts = _detail_module_prompts(
@@ -1234,11 +1575,157 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         second_plan = second_usage.split(marker, 1)[1].split("Scene allocation is fixed", 1)[0]
 
         self.assertEqual(first_plan, second_plan)
-        self.assertIn("Scene 1: infer the most natural real use of this exact uploaded product", first_plan)
-        self.assertIn("Scene 2: infer a second real use with a different user purpose", first_plan)
-        self.assertIn("Scene 3: infer a third real use with a different real environment", first_plan)
-        self.assertIn("Scene 4: infer a fourth active use with a different user goal", first_plan)
-        self.assertIn("Do not choose these from preset categories", first_plan)
+        self.assertIn("Scene 1 locked", first_plan)
+        self.assertIn("Scene 2 locked", first_plan)
+        self.assertIn("Scene 3 locked", first_plan)
+        self.assertIn("Scene 4 locked", first_plan)
+        self.assertIn("different active-use goal", first_plan)
+        self.assertIn("different real environment", first_plan)
+        self.assertIn("different props", first_plan)
+        self.assertIn("different camera distance", first_plan)
+        self.assertIn("different user group", first_plan)
+        self.assertIn("different institution or place category", first_plan)
+        self.assertIn("Scene 1 locked: distinct real environment type", first_plan)
+        self.assertIn("Scene 2 locked: different environment type", first_plan)
+        self.assertIn("Scene 3 locked: third environment type", first_plan)
+        self.assertIn("Scene 4 locked: fourth environment type", first_plan)
+        self.assertIn("Scene 1 final:", first_plan)
+        self.assertIn("Scene 2 final:", first_plan)
+        self.assertIn("Scene 3 final:", first_plan)
+        self.assertIn("Scene 4 final:", first_plan)
+        self.assertIn("locked elements:", first_plan)
+        self.assertIn("render style:", first_plan)
+        self.assertIn("scene text:", first_plan)
+        self.assertIn("caption place:", first_plan)
+        self.assertNotIn("infer a second real use", first_plan)
+
+    def test_detail_usage_scene_plan_caption_text_uses_places_only(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "文件柜",
+                "brand": "智枫",
+                "model": "ZF-CAB-01",
+                "category": "办公家具",
+            }
+        )
+        first_plan = prompts[1].split("Shared scene-caption style:", 1)[0]
+
+        self.assertIn("scene text: 办公室", first_plan)
+        self.assertIn("scene text: 档案室", first_plan)
+        self.assertIn("scene text: 前台", first_plan)
+        self.assertIn("scene text: 库房", first_plan)
+        self.assertIn("Scene plan caption-text hard constraint", first_plan)
+        self.assertNotIn("scene text: 场景", first_plan)
+        self.assertNotIn("资料调阅", first_plan)
+        self.assertNotIn("库房查找", first_plan)
+
+    def test_detail_usage_scene_modules_share_one_caption_text_style(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "折叠露营桌",
+                "brand": "山野集",
+                "model": "ZY-CAMP-120",
+                "category": "户外用品",
+            }
+        )
+        first_usage = prompts[1]
+        second_usage = prompts[2]
+
+        marker = "Shared scene-caption style:"
+        self.assertIn(marker, first_usage)
+        self.assertIn(marker, second_usage)
+        first_style = first_usage.split(marker, 1)[1].split("Scene allocation is fixed", 1)[0]
+        second_style = second_usage.split(marker, 1)[1].split("Scene allocation is fixed", 1)[0]
+
+        self.assertEqual(first_style, second_style)
+        self.assertIn(
+            "Scene 1-4 captions must use identical font style, size, weight, color, placement, label shape, spacing, and short Chinese wording",
+            first_style,
+        )
+        self.assertIn("bottom-left of each scene panel", first_style)
+        self.assertIn("semi-transparent charcoal black rgba(20,20,20,0.68)", first_style)
+        self.assertIn("text color pure white #FFFFFF", first_style)
+        self.assertIn("clean bold Chinese Heiti/Sans-serif", first_style)
+        self.assertIn("single label size 22-26px equivalent", first_style)
+        self.assertIn("border radius 6-8px", first_style)
+        self.assertIn("padding 12-16px", first_style)
+        self.assertIn("Do not vary caption typography between scenes", first_style)
+        self.assertIn("Scene caption text rule: use only the application place name", first_style)
+        self.assertIn("location or place noun only", first_style)
+        self.assertIn("No subtitle, no slogan, no sentence", first_style)
+        self.assertIn("Do not include usage purpose, user action, selling point, product function, or descriptive phrase", first_style)
+        self.assertIn("Do not include verbs or use-purpose words", first_style)
+        self.assertNotIn("Caption title length hard constraint", first_style)
+        self.assertNotIn("Caption subtitle length hard constraint", first_style)
+
+    def test_detail_usage_scene_captions_require_simple_descriptions_not_numbers_only(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "折叠露营桌",
+                "brand": "山野集",
+                "model": "ZY-CAMP-120",
+                "category": "户外用品",
+            }
+        )
+
+        for prompt in prompts[1:3]:
+            with self.subTest(prompt=prompt):
+                self.assertIn("Captions must never be only Scene 1, Scene 2, Scene 3, or Scene 4", prompt)
+                self.assertIn("use only the application place name", prompt)
+                self.assertIn("one short Chinese location label only", prompt)
+                self.assertIn("No subtitle, no slogan, no sentence", prompt)
+                self.assertIn("Do not include usage purpose, user action, selling point, product function, or descriptive phrase", prompt)
+                self.assertIn("Do not include verbs or use-purpose words", prompt)
+                self.assertNotIn("fixed-length Chinese title and subtitle", prompt)
+                self.assertNotIn("户外备餐", prompt)
+
+    def test_detail_usage_scene_caption_blocks_use_one_visual_template(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "折叠露营桌",
+                "brand": "山野集",
+                "model": "ZY-CAMP-120",
+                "category": "户外用品",
+            }
+        )
+
+        for prompt in prompts[1:3]:
+            with self.subTest(prompt=prompt):
+                self.assertIn("Use one identical caption block template for all four captions", prompt)
+                self.assertIn("same background or label box, opacity, padding, alignment, line height, and corner radius", prompt)
+                self.assertIn("Every scene-name label must be different", prompt)
+
+    def test_detail_usage_scene_caption_style_is_a_hard_constraint(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "折叠露营桌",
+                "brand": "山野集",
+                "model": "ZY-CAMP-120",
+                "category": "户外用品",
+            }
+        )
+
+        for prompt in prompts[1:3]:
+            with self.subTest(prompt=prompt):
+                self.assertIn("Caption style hard constraint", prompt)
+                self.assertIn("must strictly reuse this exact caption block template", prompt)
+                self.assertIn("Never change the caption block style between Scene 1, Scene 2, Scene 3, and Scene 4", prompt)
+
+    def test_detail_usage_scene_caption_text_must_differ_while_style_matches(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "折叠露营桌",
+                "brand": "山野集",
+                "model": "ZY-CAMP-120",
+                "category": "户外用品",
+            }
+        )
+
+        for prompt in prompts[1:3]:
+            with self.subTest(prompt=prompt):
+                self.assertIn("Caption wording hard constraint", prompt)
+                self.assertIn("caption style must stay identical, but caption text must be different for each scene", prompt)
+                self.assertIn("Never reuse identical caption wording across Scene 1, Scene 2, Scene 3, and Scene 4", prompt)
 
     def test_detail_usage_scene_plan_requires_active_use_and_excludes_maintenance_for_motorcycles(self):
         prompts = _detail_module_prompts(
@@ -1256,6 +1743,44 @@ class RealImagePipelinePromptTests(unittest.TestCase):
                 self.assertIn("For vehicles and motorcycles, usage scenes must show riding, driving, commuting, travel, road, terrain, passenger, or cargo use", prompt)
                 self.assertIn("Do not use maintenance, upkeep, repair, cleaning, inspection, storage, display, after-sales, disassembly, charging, packaging, or unboxing as usage scenes", prompt)
                 self.assertIn("不要把保养、维修、清洁、检查、仓储、陈列、售后、拆装、充电、包装或开箱当作使用场景", prompt)
+
+    def test_second_detail_usage_scene_prompt_explicitly_excludes_first_two_locked_scenes(self):
+        prompts = _detail_module_prompts(
+            {
+                "name": "蓝牙鼠标",
+                "brand": "智枫",
+                "model": "ZF-M1",
+                "category": "电脑外设",
+            }
+        )
+
+        second_usage = prompts[2]
+
+        self.assertIn("Forbidden carry-over from the previous usage-scene image: do not reuse Scene 1 or Scene 2", second_usage)
+        self.assertIn("Do not repeat their environment, props, user action, camera angle, composition, lighting, caption wording, or background", second_usage)
+
+    def test_certificate_prompt_hardens_certificate_text_and_qc_stamp_against_garbled_characters(self):
+        prompt = _prompt_for(
+            "certificate",
+            {
+                "name": "智枫保温杯",
+                "brand": "智枫",
+                "model": "ZF-CUP-800",
+                "category": "日用品",
+            },
+            {
+                "barcode_type": "EAN_13",
+                "barcode_value": "4006381333931",
+                "certificate_config": {"production_date": "2026-07-27", "inspector": "张三"},
+            },
+        )
+
+        self.assertIn("Certificate text hard constraint", prompt)
+        self.assertIn("all Chinese field labels and user-entered values on the certificate must be exact, legible, and non-garbled", prompt)
+        self.assertIn("no pseudo-Chinese, random strokes, mojibake, fake glyphs, unreadable squiggles, substituted characters, or duplicated text rows", prompt)
+        self.assertIn("QC stamp text hard constraint", prompt)
+        self.assertIn("inside the red stamp render only QC above and 01 below", prompt)
+        self.assertIn("do not render Chinese names, long inspector values, random letters, or pseudo text inside the stamp", prompt)
 
     def test_detail_module_prompts_keep_all_product_parts_from_same_reference(self):
         prompts = _detail_module_prompts(
@@ -1659,7 +2184,8 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("directly print the package text and barcode on the package surface", prompt)
         self.assertIn("Standalone package brand wordmark text: 智枫", prompt)
         self.assertIn("brand value only", prompt)
-        self.assertIn("large standalone brand wordmark", prompt)
+        self.assertIn("standalone brand wordmark", prompt)
+        self.assertIn("brand font must be half the previous large wordmark size", prompt)
         self.assertNotIn("brand: 智枫", prompt)
         self.assertIn("product name: 智枫保温杯", prompt)
         self.assertIn("specification model: ZF-CUP-800", prompt)
@@ -2018,12 +2544,14 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("Place the brand in the upper-left corner", detail_prompts[0])
         self.assertIn("usage scene section", detail_prompts[1])
         self.assertIn("exactly two aligned real-world usage scenes", detail_prompts[1])
-        self.assertIn("Infer four real usage scenarios from the uploaded product itself", detail_prompts[1])
+        self.assertIn("Fixed four-scene usage plan derived once before image generation", detail_prompts[1])
         self.assertIn("Scene 1 and Scene 2 must be chosen from the product-specific four-scene plan", detail_prompts[1])
         self.assertIn("usage scene section 2", detail_prompts[2])
         self.assertIn("exactly two aligned real-world usage scenes", detail_prompts[2])
         self.assertIn("Scene 3 and Scene 4 must be chosen from the product-specific four-scene plan", detail_prompts[2])
-        self.assertIn("structure and scale visual reference", detail_prompts[3])
+        self.assertIn("generic product detail feature display section", detail_prompts[3])
+        self.assertIn("must include Chinese text labels", detail_prompts[3])
+        self.assertIn("material texture, surface finish, structure, hardware, craftsmanship, capacity, usage feature, or other visible category-appropriate details", detail_prompts[3])
         self.assertFalse(any("product-only feature section" in prompt for prompt in detail_prompts))
         self.assertFalse(any("no lifestyle environment" in prompt for prompt in detail_prompts))
         self.assertTrue(all("finished ecommerce detail section" in prompt for prompt in detail_prompts))

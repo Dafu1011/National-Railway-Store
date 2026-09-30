@@ -45,12 +45,18 @@ class GenerationQueue:
 
     def _run(self) -> None:
         from app.api import phase_one
+        from app.api import single_image
 
         while not self._stop_event.is_set():
             processed = phase_one.process_next_queued_generation_job(
                 self.storage,
                 self.runtime_services,
             )
+            if not processed:
+                processed = single_image.process_next_queued_single_image_job(
+                    self.storage,
+                    self.runtime_services,
+                )
             if processed:
                 continue
             self._wake_event.wait(configured_positive_float("GENERATION_QUEUE_POLL_SECONDS", 0.25))

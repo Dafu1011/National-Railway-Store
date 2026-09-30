@@ -2,9 +2,11 @@ export type AccountDisplaySource = {
   user?: {
     username?: string | null;
     email?: string | null;
+    phone?: string | null;
   } | null;
   username?: string | null;
   email?: string | null;
+  phone?: string | null;
 } | null;
 
 export type TransactionDisplaySource = {
@@ -23,6 +25,8 @@ export function accountDisplayName(
     cleanText(account?.user?.username) ||
     cleanText(account?.username) ||
     cleanText(fallbackUsername) ||
+    cleanText(account?.user?.phone) ||
+    cleanText(account?.phone) ||
     cleanText(account?.user?.email) ||
     cleanText(account?.email) ||
     cleanText(fallbackEmail) ||

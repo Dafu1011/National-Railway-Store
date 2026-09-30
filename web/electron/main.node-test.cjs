@@ -11,6 +11,19 @@ test("normalizeApiBaseUrl defaults to the configured production API backend", ()
   assert.equal(normalizeApiBaseUrl(), "http://124.174.70.182:8088");
 });
 
+test("configureElectronRuntime disables hardware acceleration before opening windows", () => {
+  const { configureElectronRuntime } = require("./main.cjs");
+  const calls = [];
+
+  configureElectronRuntime({
+    app: {
+      disableHardwareAcceleration: () => calls.push("disableHardwareAcceleration"),
+    },
+  });
+
+  assert.deepEqual(calls, ["disableHardwareAcceleration"]);
+});
+
 test("normalizeApiBaseUrl removes trailing slashes and ignores paths", () => {
   assert.equal(normalizeApiBaseUrl("http://localhost:9000/api/v1/"), "http://localhost:9000");
 });

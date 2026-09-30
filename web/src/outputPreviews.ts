@@ -1,5 +1,6 @@
 export type OutputResponse = {
   id: string;
+  source?: "product_generation" | "single_image" | string;
   output_type: string;
   width: number;
   height: number;

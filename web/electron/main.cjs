@@ -212,6 +212,7 @@ async function startElectronApp() {
   const { BrowserWindow, app, ipcMain, shell } = require("electron");
   let rendererServer = null;
 
+  configureElectronRuntime({ app });
   registerUpdateIpc({ app, ipcMain });
 
   async function createMainWindow() {
@@ -287,6 +288,7 @@ if (require.main === module) {
 module.exports = {
   buildUpdateDownloadUrl,
   buildProxyTarget,
+  configureElectronRuntime,
   createUpdateInstallHandler,
   createRendererServer,
   downloadUpdateInstaller,
@@ -298,6 +300,12 @@ module.exports = {
   resolveStaticCandidate,
   sha256File,
 };
+
+function configureElectronRuntime({ app }) {
+  if (app && typeof app.disableHardwareAcceleration === "function") {
+    app.disableHardwareAcceleration();
+  }
+}
 
 function isSafeExternalUrl(rawUrl) {
   try {

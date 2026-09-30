@@ -26,28 +26,36 @@
 
 * {
   box-sizing: border-box;
-  scrollbar-width: none;
   -ms-overflow-style: none;
 }
 
 *::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: rgba(35, 36, 39, 0.22);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 html {
   scroll-behavior: smooth;
-  scrollbar-width: none;
 }
 
 body {
   min-width: 320px;
   margin: 0;
   overflow-x: hidden;
+  overflow-y: auto;
   color: var(--color-heading);
   background: var(--color-page);
-  scrollbar-width: none;
 }
 
 #root {
@@ -739,7 +747,7 @@ button:focus-visible,
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: minmax(360px, 432px) minmax(0, 1fr);
+  grid-template-columns: minmax(320px, 2fr) minmax(0, 3fr);
   gap: 16px;
   align-items: start;
   width: 100%;
@@ -761,6 +769,53 @@ button:focus-visible,
   display: flex;
   justify-content: center;
   padding: 4px 0 2px;
+}
+
+.single-image-page {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  width: 100%;
+}
+
+.single-image-config,
+.single-image-result {
+  display: grid;
+  gap: 16px;
+}
+
+.single-reference-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.single-reference-card {
+  min-height: 118px;
+  border-radius: 12px;
+}
+
+.single-reference-card .upload-preview-image {
+  height: 118px;
+}
+
+.single-empty-state {
+  display: grid;
+  min-height: 320px;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  border: 1px dashed rgba(35, 36, 39, 0.12);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.single-empty-state svg {
+  color: var(--color-muted);
 }
 
 .account-page {
@@ -902,12 +957,8 @@ button:focus-visible,
 }
 
 .config-rail {
-  position: sticky;
-  top: 98px;
-  max-height: calc(100vh - 124px);
+  align-self: start;
   overflow-x: hidden;
-  overflow-y: auto;
-  scrollbar-width: none;
 }
 
 .desktop-uploader {
@@ -917,7 +968,7 @@ button:focus-visible,
 }
 
 .desktop-uploader .ant-upload {
-  padding: 22px 14px !important;
+  padding: 14px 12px !important;
 }
 
 .desktop-uploader svg {
@@ -933,7 +984,7 @@ button:focus-visible,
 .upload-preview-card {
   position: relative;
   display: grid;
-  min-height: 246px;
+  min-height: 168px;
   overflow: hidden;
   place-items: center;
   border: 1px dashed rgba(35, 36, 39, 0.12);
@@ -952,7 +1003,7 @@ button:focus-visible,
 .upload-preview-image {
   display: block;
   width: 100%;
-  height: 246px;
+  height: 168px;
   object-fit: contain;
   background: #fff;
 }
@@ -991,9 +1042,9 @@ button:focus-visible,
 .pipeline-panel {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 24px;
+  gap: 18px;
   align-items: center;
-  min-height: 246px;
+  min-height: 188px;
   overflow: hidden;
   background:
     radial-gradient(circle at 82% 18%, rgba(227, 74, 50, 0.18), transparent 32%),
@@ -1005,9 +1056,9 @@ button:focus-visible,
 }
 
 .pipeline-copy h2.ant-typography {
-  margin-top: 14px;
+  margin-top: 10px;
   color: var(--color-heading);
-  font-size: 46px;
+  font-size: 36px;
   font-weight: 650;
   line-height: 1.1;
   letter-spacing: 0;
@@ -1016,15 +1067,15 @@ button:focus-visible,
 
 .pipeline-copy p.ant-typography {
   max-width: 680px;
-  margin-top: 12px;
+  margin-top: 8px;
   color: var(--color-text);
-  font-size: 16px;
-  line-height: 1.72;
+  font-size: 14px;
+  line-height: 1.58;
 }
 
 .progress-orb {
   display: grid;
-  min-width: 170px;
+  min-width: 136px;
   place-items: center;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.58);
@@ -1037,10 +1088,10 @@ button:focus-visible,
 
 .metric-tile {
   display: flex;
-  min-height: 104px;
+  min-height: 82px;
   align-items: center;
   gap: 14px;
-  padding: 16px;
+  padding: 12px 14px;
   border-radius: 22px;
 }
 
@@ -1051,9 +1102,9 @@ button:focus-visible,
 }
 
 .metric-tile > svg {
-  width: 42px;
-  height: 42px;
-  padding: 10px;
+  width: 36px;
+  height: 36px;
+  padding: 8px;
   border-radius: 16px;
   color: var(--color-accent);
   background: var(--color-stage);
@@ -1067,7 +1118,7 @@ button:focus-visible,
 
 .metric-tile .ant-statistic-content {
   color: var(--color-heading);
-  font-size: 21px;
+  font-size: 18px;
   font-weight: 700;
 }
 

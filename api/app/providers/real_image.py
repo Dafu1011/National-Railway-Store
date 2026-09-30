@@ -57,6 +57,7 @@ class KeleFiveImagePipeline:
         generated: list[GeneratedImage] = []
         reference_image_paths = reference_image_paths or {}
         failures: list[str] = []
+        product_reference_image_path = source_image_path
 
         for output_type, width, height in OUTPUT_SPECS:
             try:
@@ -66,7 +67,7 @@ class KeleFiveImagePipeline:
                         raw = self.provider.edit_image(
                             prompt=prompt,
                             size=self.edit_size,
-                            image_paths=[source_image_path],
+                            image_paths=[product_reference_image_path],
                         )
                         module_images.append(_open_provider_image(raw))
                     image = _build_detail_page(module_images, product, project, self.font_path)
@@ -75,7 +76,7 @@ class KeleFiveImagePipeline:
                     generated.append(GeneratedImage(output_type=output_type, width=image.width, height=image.height, path=path))
                     continue
 
-                image_paths = [source_image_path]
+                image_paths = [product_reference_image_path]
                 if output_type == "main" and reference_image_paths.get("logo"):
                     image_paths.append(reference_image_paths["logo"])
                 if output_type in {"certificate", "package"} and reference_image_paths.get(output_type):
@@ -90,7 +91,7 @@ class KeleFiveImagePipeline:
                     },
                 )
                 if output_type == "main" and reference_image_paths.get("logo"):
-                    prompt += " A brand logo reference image is provided as the second image. Preserve its exact logo design and place one copy in the upper-left corner of the generated main image, with natural scale and margins. Do not redesign, duplicate, or add the logo elsewhere."
+                    prompt += _brand_logo_corner_instruction()
                 raw = self.provider.edit_image(
                     prompt=prompt,
                     size=self.edit_size,
@@ -100,6 +101,17 @@ class KeleFiveImagePipeline:
                 image = _normalize_size(image, width, height, background="white" if output_type in {"main", "certificate", "package"} else "#f3f4f6")
                 path = job_dir / f"{output_type}.png"
                 image.save(path, format="PNG")
+                if output_type == "main" and reference_image_paths.get("logo") and _product_logo_enabled(project):
+                    raw = self.provider.edit_image(
+                        prompt=_main_product_logo_second_pass_instruction(product),
+                        size=self.edit_size,
+                        image_paths=[path, reference_image_paths["logo"]],
+                    )
+                    image = _open_provider_image(raw)
+                    image = _normalize_size(image, width, height, background="white")
+                    image.save(path, format="PNG")
+                if output_type == "main":
+                    product_reference_image_path = path
                 generated.append(GeneratedImage(output_type=output_type, width=image.width, height=image.height, path=path))
             except Exception as exc:
                 failures.append(f"{output_type}: {exc}")
@@ -124,11 +136,11 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
     package_rows = _package_information_rows(product, package_manufacturer, package_address)
     package_brand = _clean_text(product.get("brand", ""))
     package_brand_wordmark = (
-        "Package brand rendering rule: render the brand value only as a large standalone brand wordmark on the package front; "
-        "brand value only, never render the field label Brand, brand, 品牌, or 品牌： before it. "
-        "Render it as large standard printed Chinese brand text, plain regular-weight Songti/Heiti-style characters, not artistic typography, not calligraphy, not brush style, not decorative typography, not a stylized logo redesign. "
-        "The standalone brand wordmark must be much larger than the ordinary information rows and occupy more pixels. character correctness and complete stroke structure are more important than sharpness; slight softness or mild ink blur is acceptable. "
-        "Do not squeeze, merge, simplify, substitute, pseudo-render, split, connect, warp, or decorate any brand character. Preserve every radical, stroke order impression, inner gap, and complete Chinese stroke structure as faithfully as possible. "
+        "Package brand position and size hard constraint: place the standalone brand wordmark in the upper-left corner of the package front; brand or logo visual area must be about 5% of the visible package front; brand font must be half the previous large wordmark size. "
+        "Package brand rendering rule: brand value only as a standalone brand wordmark on the package front; never render the field label Brand, brand, 品牌, or 品牌： before it. "
+        "Render standard printed Chinese brand text, regular Songti/Heiti-style, not artistic typography, not calligraphy, not brush style, not decorative typography, not a stylized logo redesign. "
+        "Keep it readable but not oversized; character correctness and complete stroke structure are more important than sharpness; slight softness or mild ink blur is acceptable. "
+        "Do not squeeze, merge, simplify, substitute, pseudo-render, warp, or decorate brand characters. "
         f"Standalone package brand wordmark text: {package_brand}. "
         if package_brand
         else "No standalone package brand wordmark is needed because the user did not enter a brand. "
@@ -143,7 +155,7 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
     ]
     package_text_layout = (
         "Candidate package side information area, printed directly by the image model as native ink on the visible package side panel only, "
-        "using only non-empty user-entered ordinary information rows in this Chinese label order, excluding the brand row because the brand is rendered separately as the large wordmark: "
+        "using only non-empty user-entered ordinary information rows in this Chinese label order, excluding the brand row because the brand is rendered separately as the standalone wordmark: "
         f"{_format_chinese_rows(package_rows)} "
     )
     package_facts = (
@@ -153,10 +165,10 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
     certificate_manufacturer = certificate_config.get("manufacturer_name") or _company_name(product, certificate_config)
     certificate_address = certificate_config.get("manufacturer_address") or certificate_config.get("address") or package_address
     certificate_facts = (
-        "Certificate fields from user input: "
+        "Certificate fields: "
         f"brand: {product.get('brand', '')}; "
         f"product name: {product.get('name', '')}; "
-        f"model/specification: {product.get('model', '')}; "
+        f"model: {product.get('model', '')}; "
         f"production date: {certificate_config.get('production_date', '')}; "
         f"manufacturer: {certificate_manufacturer}; "
         f"factory address: {certificate_address}; "
@@ -164,13 +176,13 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
         f"barcode digits: {project.get('barcode_value', '')}. "
     )
     certificate_reference_instruction = (
-        "A certificate reference image is provided as an additional reference image. The certificate reference image is the highest-priority certificate-card style reference. If the reference certificate has a different border, card proportions, field spacing, stamp style, or barcode zone, keep those certificate design traits while replacing only the readable product data with the current user-entered fields; do not copy old data, old barcode digits, old date, old inspector value, camera composition, background, or product pose. "
+        "A certificate reference image is provided as an additional reference image. The certificate reference image is the highest-priority certificate-card style reference. If the reference certificate has a different border, card proportions, field spacing, stamp style, or barcode zone, keep those certificate design traits while replacing only the readable product data; do not copy old data, barcode digits, date, inspector, camera, background, or product pose. "
         if project.get("has_certificate_reference")
         else "No certificate reference image is provided; generate a simple realistic certificate style based on the product and user-entered certificate fields. "
     )
     has_package_reference = bool(project.get("has_package_reference"))
     package_reference_instruction = (
-        "A package reference image is provided as an additional reference image. The package reference image is the highest-priority packaging-style reference. The current uploaded product and user-entered specification are higher priority than copying the reference package literally. Use the package reference only for packaging style: box type, form factor, handle or carry strap, color palette, graphic density, panel decoration, material finish, flap or lid construction, surface texture, and print-layout rhythm; do not copy its old product data, old barcode digits, old brand, old size, background, camera composition, or product pose. Keep the generated scene on the required pure white background even if the package reference image has a colored environment. Adapt the referenced package style to the current product category, product volume, product count, storage needs, and realistic retail packaging logic. If the reference package belongs to a different product category, borrow only its broad visual language and construction cues, then adjust package proportions, handle/carry structure, panel graphics, and decoration intensity so the final package looks designed for the current product itself; do not copy a packaging proportion, carry structure, visual motif, or premium/cartoon/fresh-food style that would make the final package look mismatched to the current product. "
+        "A package reference image is provided as an additional reference image. The package reference image is the highest-priority packaging-style reference. The current uploaded product and user-entered specification are higher priority than copying the reference package literally. Use the package reference only for packaging style: box type, form factor, handle or carry strap, color palette, graphic density, panel decoration, material finish, flap or lid construction, surface texture, and print-layout rhythm; do not copy its old product data, old barcode digits, old brand, old size, background, camera composition, or product pose. Package reference text-layout hard constraint: preserve the uploaded package reference's text block positions, front/side panel assignment, brand zone, product-information zone, barcode zone, and alignment. Replace old readable content only; do not move the text zones to another panel, do not center, restack, or invent a new package text layout. Adapt the referenced package style to the current product category, product volume, product count, storage needs, and realistic retail packaging logic. If the reference package belongs to a different product category, borrow only its broad visual language and construction cues, then adjust package proportions, handle/carry structure, panel graphics, and decoration intensity so the final package looks designed for the current product itself; do not copy a packaging proportion, carry structure, visual motif, or premium/cartoon/fresh-food style that would make the final package look mismatched to the current product. "
         if has_package_reference
         else "No package reference image is provided; design a product-appropriate retail package based on the uploaded product structure and user-entered specification model. Choose the package box shape, material feel, color system, and graphic style from the product's real category and retail packing logic. Do not default to a generic brown package, tall narrow bottle box, high box, or plain shipping box unless that is the realistic package for this product. "
     )
@@ -190,9 +202,10 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
         else "The visible package side face should stay visually simple and consistent with the generated retail package style, with no random unrelated side icons, side logos, warning marks, or duplicate barcode blocks. "
     )
     package_barcode_position_instruction = (
-        "The barcode must be directly below the side information area on the same visible package side panel, following normal retail package layout logic. The barcode and all information rows must remain fully visible, uncropped, unobstructed, and inside the same side panel. Package information text and barcode must be locked to the same physical side-panel plane, sharing its perspective, skew, foreshortening, carton fiber, lighting, and edge boundaries; they must not float in the white background, cross outside the side-panel edges, or look like a screen overlay. The package barcode must not be centered high, placed near the brand wordmark, placed on the front display area, or floating outside the package; it must sit on a real visible package side surface with enough quiet space around it. "
-        if has_package_reference
-        else "The barcode must be directly below the side information area on the same visible package side panel, following normal retail package layout logic. The barcode and all information rows must remain fully visible, uncropped, unobstructed, and inside the same side panel. Package information text and barcode must be locked to the same physical side-panel plane, sharing its perspective, skew, foreshortening, carton fiber, lighting, and edge boundaries; they must not float in the white background, cross outside the side-panel edges, or look like a screen overlay. The package barcode must not be centered high, placed near the brand wordmark, placed on the front display area, or floating outside the package; it must sit on a real visible package side surface with enough quiet space around it. "
+        "The barcode must be directly below the side information area on the same visible package side panel, following normal retail package layout logic. "
+        "The barcode and all information rows must remain fully visible, uncropped, unobstructed, and inside the same side panel. "
+        "Package information text and barcode must be locked to the same physical side-panel plane, sharing its perspective, skew, foreshortening, carton fiber, lighting, and edge boundaries; they must not float in the white background, cross outside the side-panel edges, or look like a screen overlay. "
+        "The package barcode must not be centered high, placed near the brand wordmark, placed on the front display area, or floating outside the package; it must sit on a real visible package side surface with enough quiet space around it. "
     )
     package_physical_capacity_instruction = (
         "The package must be physically large enough to contain the uploaded product and every unit implied by the user-entered specification model. "
@@ -204,19 +217,59 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
     )
     package_capacity_plan = _package_capacity_plan(product)
     package_product_pose_instruction = _package_product_pose_instruction(product)
-    certificate_product_identity_instruction = _certificate_product_identity_instruction(product)
-    certificate_composition_instruction = _certificate_composition_instruction(product)
-    certificate_placement_instruction = _certificate_placement_instruction(product)
-    certificate_view_instruction = _certificate_view_instruction(product)
-    certificate_background_instruction = _certificate_background_instruction(product)
-    certificate_mode_prefix = _certificate_mode_prefix(product)
+    certificate_product_identity_instruction = _certificate_product_identity_instruction(product, project)
+    certificate_composition_instruction = _certificate_composition_instruction(product, project)
+    certificate_placement_instruction = _certificate_placement_instruction(product, project)
+    certificate_view_instruction = _certificate_view_instruction(product, project)
+    certificate_background_instruction = _certificate_background_instruction(product, project)
+    certificate_mode_prefix = _certificate_mode_prefix(product, project)
+    product_logo_fusion_instruction = _product_logo_fusion_instruction(project)
+    main_reference_scope_instruction = _main_reference_scope_instruction()
+    main_product_consistency_instruction = _main_product_consistency_instruction()
+    is_large_product = _is_large_certificate_product(product, project)
+    package_product_scene_instruction = (
+        "Large-product package-only mode is active: generate only one realistic retail shipping or sales package box for the product. "
+        "Do not render the product itself anywhere in the image: no product beside the package, no product on the tabletop, no product inside the opened box, no partially visible product, no product thumbnail, no product photo, no product illustration, no product silhouette, no product reflection, and no poster showing the product. "
+        "Use the provided product reference only to infer package capacity, product category, scale, and required printed facts; the visible scene must contain packaging only. "
+        if is_large_product
+        else "Create an 800x800 pure white background product-and-package co-photo: appropriately sized retail package on the left, uploaded product near it on the right-side tabletop when physically possible. Let the product use its natural resting pose, even if flatter, lower, wider, or less visually prominent. Use the uploaded product as the only visual reference; remove any stand, hook, rack, hanger, pole, base, mannequin, or other support. "
+    )
+    package_product_identity_instruction = (
+        "Package graphics in large-product package-only mode may use abstract branding, color blocks, icons, and readable product facts, but must not show the product body as a photo, illustration, silhouette, or cutaway. "
+        if is_large_product
+        else (
+            "Preserve the uploaded product's visible product type, main structure, proportions, seams, surface finish, material texture, edges, visible logo, and recognizable appearance after excluding non-product support hardware. Do not redesign, recolor, deform, squeeze, stretch, taper, swell, or replace the product. Do not preserve the uploaded source image's exact 2D silhouette, source camera angle, source canvas orientation, or supported display posture. Re-project the product into its physically natural tabletop pose even if flatter, lower, foreshortened, side-facing, or less complete. For cylindrical products, keep straight body sides and aligned top/bottom ellipses; for headphones, preserve headband arc, earcups, hinges, cushions, and left-right relationship without adding the source display stand. "
+            "Keep product edges smooth, continuous, anti-aliased, and photographic: no jagged stair-step edges, pixelated contour, fuzzy AI mask, white fringe, broken outline, melted edge, or cutout halo. "
+        )
+    )
+    package_completion_instruction = (
+        "The package must remain fully inside the image with comfortable white breathing room; 商品包装必须完整，包装顶部、底部、四角、折边、封口线和箱体轮廓都必须完整可见. "
+        if is_large_product
+        else "The package must remain fully inside the image with comfortable white breathing room; 商品包装必须完整，包装顶部、底部、四角、折边、封口线和箱体轮廓都必须完整可见. Avoid unnecessary product cropping, but product physical resting pose is more important than showing every outline; do not rotate the product upright just to keep it complete. "
+    )
+    package_exposure_instruction = (
+        "Critical exposure requirement: prevent overexposure on the top of the packaging. 包装顶部严禁过曝. Preserve tonal detail, edge transitions, package material texture, and top flap geometry. "
+        if is_large_product
+        else "Critical exposure requirement: prevent overexposure on the top of the product and the top of the packaging. 商品顶部严禁过度曝光，包装顶部也严禁过曝. Preserve tonal detail, lid contour, rim, edge transitions, package material texture, and top flap geometry; no black product top may become a blown-out white or pale gray patch. "
+    )
+    package_lighting_instruction = (
+        "Use soft natural light from the left/upper-left with restrained highlights, mild clean contact shadows, and consistent direction across the package and tabletop. "
+        if is_large_product
+        else "Use soft natural light from the left/upper-left with restrained highlights, mild clean contact shadows, and consistent direction across package, product, and tabletop. "
+    )
+    package_final_instruction = (
+        "Final result: realistic retail package-only photo with complete packaging geometry, accurate package capacity, controlled highlights, no visible product, no distorted packaging, crooked typography, warped retail codes, incomplete packaging, floating print layers, or blown-out highlights."
+        if is_large_product
+        else "Final result: realistic retail product photo with complete packaging geometry, accurate product structure, controlled highlights, no distorted packaging, crooked typography, warped retail codes, incomplete packaging, floating print layers, or blown-out highlights."
+    )
     reference_base = (
-        "Use the uploaded product photo as the exact product reference. "
-        "The uploaded product photo may be an angled, side, top-down, or non-front view; preserve the real visible product appearance from that view, including visible side geometry, foreshortening, label perspective, seam direction, cap/lid ellipse, logo position, and any occluded or partially visible surfaces. Do not force the product into a generic front-facing, perfectly symmetrical, or redesigned catalog view. When a new scene camera angle is required, re-project the same real product structure into that camera angle while keeping the uploaded-view identity and perspective clues consistent. "
+        "Use the provided product reference image as the exact product reference; this is the original upload for the main photo and the generated main product image when generating outputs after the main photo. "
+        + main_reference_scope_instruction
+        + "The provided product reference image may be an angled, side, top-down, or non-front view; preserve the real visible product appearance from that view, including visible side geometry, foreshortening, label perspective, seam direction, cap/lid ellipse, logo position, and any occluded or partially visible surfaces. Do not force the product into a generic front-facing, perfectly symmetrical, or redesigned catalog view. When a new scene camera angle is required, re-project the same real product structure into that camera angle while keeping the reference-view identity and perspective clues consistent. "
         "All five generated image types must depict the same single uploaded product and preserve the same product style identity across marketplace main photo, certificate co-photo, package co-photo, detail page, and scene photo. Do not switch to a different SKU, package variant, colorway, flavor, label design, logo layout, cap shape, bottle shape, accessory set, or material finish between image types. "
         "User-entered product information is the source of truth for all readable product facts. For generated readable labels, package printing, certificate rows, and detail-page fact text, do not preserve or copy conflicting readable product facts from the uploaded product photo or package reference. If the visual source contains old or conflicting text, keep only the product appearance or package style and replace readable facts with the current user-entered information. "
         "Keep the product structure, color, material, proportions, wear, and surface texture consistent. "
-        "Identify and keep only the actual sellable product body from the uploaded photo. Exclude display stands, support poles, bases, hooks, hangers, risers, background props, and any non-product objects even if they touch or hold the product in the source image. For headphones or earphones, the product body means only the headband, earcups, hinges, cushions, cable, controls, and other headphone parts; never include a mannequin head, stand, rack, pole, or base as part of the product. "
+        "Identify and keep only the actual sellable product body from the provided product reference image. Exclude display stands, support poles, bases, hooks, hangers, risers, background props, and any non-product objects even if they touch or hold the product in the source image. For headphones or earphones, the product body means only the headband, earcups, hinges, cushions, cable, controls, and other headphone parts; never include a mannequin head, stand, rack, pole, or base as part of the product. "
         "preserve existing physical markings: the exact visible logo, brand lettering, small badges, and surface markings from the uploaded product when visible, but do not invent new readable text. "
         "If the source product includes an R mark, circled R, or tiny registered trademark symbol beside the logo, that same tiny registered trademark symbol must appear in every generated product view where that side is visible. "
         "do not add parts, accessories, packaging, labels, or quantities that are not visible in the uploaded image. "
@@ -233,12 +286,18 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
         "Use believable lens perspective, realistic contact with the surface, real material texture, slight photographic imperfections, and normal depth of field. "
         "Use clean product-catalog lighting with minimal or no visible floor shadow under the product. "
     )
+    scene_main_product_identity = (
+        "Scene product identity hard constraint: the product in the scene must match the generated main product image, including structure, proportions, color, material, surface texture, edges, seams, handles, openings, panels, hardware, logo position, visible markings, and recognizable silhouette. "
+        "Only the environment, camera angle, lighting, and natural placement may change. Do not keep only the logo while replacing, redesigning, recoloring, resizing, or simplifying the product body. "
+        "Do not substitute a similar product, alternate SKU, generic object, or newly imagined version of the product. "
+    )
     prompts = {
         "main": (
             reference_base
             + real_photo
             + clean_product_surface
             + catalog_exposure_control
+            + product_logo_fusion_instruction
             + f"Create a marketplace product main photo for {name}: white sweep or tabletop, only the complete sellable product, filling most of the frame with minimal or no visible floor shadow. Remove source-photo stands and auxiliary objects; reconstruct only the product body in a natural standalone pose."
         ),
         "certificate": (
@@ -248,26 +307,26 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
             + "The output must look like a real camera photograph, not CGI, not a 3D render, and preserve existing physical markings. Generate exactly 1024x1024, 1:1 square. "
             + certificate_view_instruction
             + certificate_background_instruction
-            + "Composition priority: readable certificate first, user-entered facts second, uploaded-product appearance third, pure white background fourth. "
+            + "Composition priority: readable certificate first, then user facts, product appearance, and pure white background. "
             + certificate_composition_instruction
             + certificate_placement_instruction
             + "Directly generate both the product and the certificate in one natural photo. The certificate, its printed rows, its barcode, and its quality inspection stamp must be generated by the image model as part of the same camera shot. "
             + certificate_reference_instruction
             + certificate_facts
-            + f"Required certificate layout: title 产品合格证 or 合格证; rows 品牌, 名称, 规格型号, 生产日期, 生产厂家, 厂址, 检验员; one red quality inspection stamp based on {_clean_text(certificate_config.get('inspector') or 'QC-01')} and one barcode using the entered barcode type and digits. Only these fields and user-entered values. Stamp: small circular stamp, center line, QC above, exactly 01 below. "
-            "No plain-text 检验结果：合格, 结果：合格, or standalone 合格 row. The 检验员 field label must remain visible on the certificate; do not remove, hide, or omit the 检验员 label. Do not print the inspector parameter value as ordinary black text after 检验员; the red quality inspection stamp is the inspector field value. Place the stamp in or near the inspector field value area. Render exactly one small red circular quality inspection stamp directly on the certificate, about two thirds of the previous visual size, and keep the quality inspection stamp completely inside the certificate card boundary, not covering, touching, or overlapping the barcode. "
+            + f"Required certificate layout: title 产品合格证 or 合格证; rows 品牌, 名称, 规格型号, 生产日期, 生产厂家, 厂址, 检验员; one red quality inspection stamp based on {_clean_text(certificate_config.get('inspector') or 'QC-01')} and one barcode using the entered barcode type and digits. Only these fields and user-entered values. Stamp: small circular stamp. Certificate text hard constraint: all Chinese field labels and user-entered values on the certificate must be exact, legible, and non-garbled; no pseudo-Chinese, random strokes, mojibake, fake glyphs, unreadable squiggles, substituted characters, or duplicated text rows. QC stamp text hard constraint: inside the red stamp render only QC above and 01 below; do not render Chinese names, long inspector values, random letters, or pseudo text inside the stamp. "
+            "The 检验员 field label must remain visible on the certificate; do not remove, hide, or omit the 检验员 label. Do not print the inspector parameter value as ordinary black text after 检验员; the red quality inspection stamp is the inspector field value. Place the stamp in or near the inspector field value area. Render exactly one small red circular quality inspection stamp directly on the certificate, about two thirds of the previous visual size, and keep the quality inspection stamp completely inside the certificate card boundary, not covering, touching, or overlapping the barcode. "
             "Certificate barcode: one real EAN retail barcode centered on the certificate; left start guard, center guard, and right end guard bars are longer; data bars vary in width and some height, not equal-height decorative stripes; white quiet zones remain on both sides; digits follow EAN layout with the first digit outside left and the remaining digits below as 6 left digits + 6 right digits. Barcode numerals must exactly match the entered barcode digits, regular weight, not scrambled, missing, substituted, bold, or fused into bars. Use black/dark gray printing; avoid garbled characters, pseudo text, duplicate text blocks, QR codes, and unrelated fields. "
             "Product red elements are allowed only when they already exist in the uploaded product reference. Do not transfer certificate inspector-stamp semantics onto the product; certificate-only inspector stamp must not appear on product switches or product parts. Do not run any global red-color removal."
         ),
         "package": (
             reference_base
+            + ("" if is_large_product else main_product_consistency_instruction)
             + real_photo
-            + clean_product_surface
-            + catalog_exposure_control
-            + "Create a pure white background product-and-package co-photo with an appropriately sized retail package on the left and the uploaded product near it on the right-side tabletop when physically possible. Let the product use its natural resting pose, even if flatter, lower, wider, or less visually prominent. Use the uploaded product as the only visual reference for its shape, parts, proportions, material, color, texture, markings, and structure; remove any stand, hook, rack, hanger, pole, base, mannequin, or other support. Output exactly 800x800 pixels, 1:1 square. "
+            + package_product_scene_instruction
             + package_reference_instruction
-            + "The scene must keep a clean seamless pure #ffffff white background and a pure white matte tabletop surface. The background and tabletop should visually merge naturally with no visible horizon line, no wall, no table edge, no floor, no colored background, no environmental objects, and no clutter. "
-            "Package size rule: the box must be large and visibly able to contain the product in its realistic packed state, using folded, nested, detached, or storage volume when the product is large or long equipment. It must also fit the full specified quantity, padding, and closure room. Enlarge physical panels as needed and re-layout package text, logos, barcode, illustrations, and graphics without stretching or warping. If the square frame is tight, crop or reduce the visible product instead of shrinking the package. Do not default to a tall narrow bottle package, high box, or vertical box shape. For headphones or earphones, use a medium-small box wider and shallower than a bottle package, sized for folded or nested earcups and headband; never use a thermos-style package for headphones. "
+            + "The scene must keep a clean seamless pure #ffffff white background and pure white matte tabletop with no horizon line, wall, table edge, floor, colored background, props, or clutter. "
+            "Package color hard constraint: do not generate a black-and-white, grayscale, monochrome, or desaturated package image; keep full-color retail package. "
+            "Package size rule: the box must be large and visibly able to contain the product in its realistic packed state, using folded, nested, detached, or storage volume when the product is large or long equipment, plus full specified quantity, padding, and closure room. Enlarge panels and re-layout package text, logos, barcode, illustrations, and graphics without stretching or warping. If the square frame is tight, crop or reduce the visible product instead of shrinking the package. Do not default to a tall narrow bottle package, high box, or vertical box shape. For headphones or earphones, use a medium-small box wider and shallower than a bottle package, sized for folded or nested earcups and headband; never use a thermos-style package for headphones. "
             + package_physical_capacity_instruction
             + package_capacity_plan
             + package_style_instruction
@@ -275,20 +334,19 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
             + package_product_pose_instruction
             + package_front_geometry_instruction
             + package_side_instruction
-            + "The package front must have no unnecessary artificial printed border unless that border style comes from the package reference. The ordinary package information area must be on the visible package side panel only. Do not create a front information area; the package front may carry the large brand wordmark, product image, product illustration, or decorative visual design, but ordinary information rows and barcode must stay on the side panel. The model must directly print the package text and barcode on the package surface as native ink or printed packaging graphics, not as a floating sticker, not as an overlay, and not as a separate label. "
+            + "The package front must have no unnecessary artificial printed border unless that border style comes from the package reference. The ordinary package information area must be on the visible package side panel only. Do not create a front information area; the front may carry the upper-left brand wordmark, product image, illustration, or decorative design, but ordinary rows and barcode must stay on the side panel. The model must directly print the package text and barcode on the package surface as native ink or printed packaging graphics, not as a floating sticker, overlay, or separate label. "
             + package_brand_wordmark
             + package_facts
             + package_text_layout
-            + "On the package, print every non-empty user-entered product-information field listed above as authoritative product facts; show each complete value in full exactly once, never partially. At minimum, show full product name, specification/model, manufacturer, address, barcode type, and barcode digits when provided; do not omit, truncate, abbreviate, merge, mask, or replace any provided value. If the side panel is too small, enlarge the information area, reduce decorative graphics, increase print size, or adjust perspective before sacrificing information. Do not show values not entered by the user or copied from another product, package reference, or old source-image text; do not invent replacements. Render only the exact compatible Chinese and Latin characters from the package information. no garbled characters, no pseudo text, no random English replacement words, no hallucinated brand, no duplicate text blocks, no unrelated product facts, and no invented labels. Keep package text upright, level, evenly spaced, complete, and aligned like normal printing, with no diagonal drift or perspective mismatch. "
+            + "On the package, print every non-empty user-entered product-information field above as authoritative facts; show each complete value in full exactly once. At minimum, show full product name, specification/model, manufacturer, address, barcode type, and barcode digits when provided; do not omit, truncate, abbreviate, merge, mask, or replace any provided value. If the side panel is small, enlarge the information area, reduce decoration, increase print size, or adjust perspective before sacrificing information. Do not show values not entered by the user or copied from another product, package reference, or old source-image text; do not invent replacements. Render only exact compatible Chinese and Latin characters. no garbled characters, no pseudo text, no random English replacement words, no hallucinated brand, no duplicate text blocks, no unrelated product facts, and no invented labels. Keep package text upright, level, complete, and aligned like normal printing. "
             + package_barcode_position_instruction
             + "The barcode must be drawn directly on the visible package surface from the barcode type and barcode digits above, like a real EAN retail barcode. The first digit outside the barcode bars on the left; first digit must sit left of the start guard bars, outside the bar area; left six digits start after the start guard with the second barcode digit; the first digit must not appear below vertical bars or inside the left six-digit group. The remaining digits sit below the bars in two groups with a center guard before the right group; start guard two bars, center guard two bars before the eighth digit, and end guard two bars are the longest. The bars must vary naturally in width and height like a real EAN retail barcode, with thin and thick vertical bars, clean white gaps, realistic quiet zones, and no decorative simplification. barcode digits must be clear, regular weight, and not bold; barcode digits must not be missing, truncated, omitted, substituted, reordered, or incomplete; not bold, not blurry, not thickened, not smeared, and not fused into the vertical code bars. Use one barcode block only, with readable digits below the bars, sized realistically for the package. no malformed barcode shape, no broken barcode structure, no decorative fake barcode shape, no collapsed bars, no missing guard bars, no merged bars, no random barcode-like stripes, and no incorrect barcode geometry. "
-            "Do not add handling marks, up arrows, moisture marks, random extra labels, unrelated code graphics, unrelated QR codes, warning triangles, stickers, badges, unrelated certification symbols, or duplicate barcode blocks; avoid unrelated warning symbols. "
-            "Preserve the uploaded product's visible product type, main structure, proportions, seams, surface finish, material texture, edges, visible logo, and recognizable appearance after excluding non-product support hardware. Do not redesign, recolor, deform, squeeze, stretch, taper, swell, or replace the product. Do not preserve the uploaded source image's exact 2D silhouette, source camera angle, source canvas orientation, or supported display posture. Re-project the product into its physically natural tabletop pose even if this makes the product look flatter, lower, foreshortened, side-facing, or less complete than the source reference. For cylindrical products, preserve the cylindrical form accurately with straight body sides and properly aligned top and bottom ellipses; for headphones, preserve the headband arc, earcup shapes, hinge geometry, cushions, and left-right relationship without adding the source display stand. "
-            "Keep product edges smooth, continuous, anti-aliased, and photographic in the final natural resting pose. No jagged stair-step edges, no pixelated contour, no fuzzy AI mask, no white fringe, no broken outline, no melted edge, and no cutout halo. "
-            "The package must remain fully inside the image with comfortable white breathing room around its complete packaging silhouette. Avoid unnecessary product cropping, but product physical resting pose is more important than showing every product outline or feature. Do not rotate the product upright just to keep the product outline complete. 商品包装必须完整，包装顶部、底部、四角、折边、封口线和箱体轮廓都必须完整可见. "
-            "Use soft natural light from the left and upper-left with restrained realistic highlights and mild clean contact shadows. Lighting direction must remain consistent across the package, the product, and tabletop. Avoid harsh studio lighting and avoid conflicting highlight directions. "
-            "Critical exposure requirement: prevent overexposure on the top of the product and the top of the packaging. 商品顶部严禁过度曝光，包装顶部也严禁过曝. Preserve visible tonal detail, lid contour, rim, edge transitions, package material texture, and top flap geometry. No part of the black product top may become a blown-out white or pale gray patch. "
-            "The final feeling must be a realistic retail product photograph: clean, believable, restrained, with complete packaging geometry, accurate product structure, a clean product-and-package co-photo, controlled highlights, and no overexposure on the product or package top. Avoid CGI rendering, exaggerated advertising gloss, distorted packaging, crooked typography, warped retail codes, bold retail-code numerals, incomplete packaging, floating print layers, and blown-out highlights."
+            "Do not add handling marks, up arrows, moisture marks, random labels, unrelated QR/code graphics, warning symbols, stickers, badges, certifications, or duplicate barcode blocks; avoid unrelated warning symbols. "
+            + package_product_identity_instruction
+            + package_completion_instruction
+            + package_lighting_instruction
+            + package_exposure_instruction
+            + package_final_instruction
         ),
         "detail": (
             reference_base
@@ -299,6 +357,8 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
         "scene": (
             reference_base
             + real_photo
+            + main_product_consistency_instruction
+            + scene_main_product_identity
             + _scene_instruction(category)
         ),
     }
@@ -364,19 +424,26 @@ SMALL_CERTIFICATE_PRODUCT_TOKENS = (
 )
 
 
-def _is_large_certificate_product(product: dict[str, Any]) -> bool:
+def _is_large_certificate_product(product: dict[str, Any], project: dict[str, Any] | None = None) -> bool:
+    certificate_config = project.get("certificate_config", {}) if isinstance(project, dict) else {}
+    if not isinstance(certificate_config, dict):
+        certificate_config = {}
+    product_volume = _clean_text(certificate_config.get("product_volume", "")).lower()
+    if product_volume == "large":
+        return True
+    if product_volume == "small":
+        return False
     text = " ".join(str(product.get(key, "") or "").lower() for key in ("name", "category", "model", "description"))
     if any(token in text for token in SMALL_CERTIFICATE_PRODUCT_TOKENS):
         return False
     return any(token in text for token in LARGE_CERTIFICATE_PRODUCT_TOKENS)
 
 
-def _certificate_composition_instruction(product: dict[str, Any]) -> str:
-    if _is_large_certificate_product(product):
+def _certificate_composition_instruction(product: dict[str, Any], project: dict[str, Any] | None = None) -> str:
+    if _is_large_certificate_product(product, project):
         return (
             "Large-product certificate composition is active: product must show a cropped close partial view, "
-            "not the complete object; show about one third of the large product. Show recognizable features such as wheel, brush head, handle, "
-            "engine, body panel, logo area, color block, texture, or main functional structure. "
+            "not the complete object; show about one third of the large product. Show recognizable functional structure. "
             "Do not show the full product or shrink a bulky product into toy scale. "
         )
     return (
@@ -385,36 +452,42 @@ def _certificate_composition_instruction(product: dict[str, Any]) -> str:
     )
 
 
-def _certificate_product_identity_instruction(product: dict[str, Any]) -> str:
-    if _is_large_certificate_product(product):
+def _certificate_product_identity_instruction(product: dict[str, Any], project: dict[str, Any] | None = None) -> str:
+    main_product_consistency_instruction = _main_product_consistency_instruction()
+    if _is_large_certificate_product(product, project):
         return (
-            "Use the uploaded product image as the only product reference; preserve color, material, markings, proportions, and recognizable structure. "
-            "Do not switch SKU, redesign the product, lock to the uploaded 2D silhouette, or keep non-product supports. "
-            "Place the product naturally with no floating, no tipping, no impossible balance, no intersection. "
+            "Use uploaded product as the only product reference; preserve color, material, markings, proportions, and structure. "
+            + _main_reference_scope_instruction()
+            + main_product_consistency_instruction
+            +
+            "No SKU switch, redesign, 2D silhouette lock, supports, floating, tipping, impossible balance, or intersection. "
         )
     return (
-        "Use the uploaded product image as the only product reference. All five generated image types must depict the same single uploaded product and same product style identity. Do not switch to a different SKU, package variant, colorway, flavor, label design, logo layout, cap shape, bottle shape, accessory set, or material finish. Preserve color, material, texture, markings, proportions, and recognizable structure; do not lock to the uploaded 2D silhouette or camera angle. Remove non-product supports. Choose the product's orientation from its real structure, center of gravity, and normal display logic; do not mechanically force every product to stand upright. Re-place the product naturally with no floating, no tipping, no impossible balance, no intersection. "
+        "Use the uploaded product image as the only product reference. "
+        + _main_reference_scope_instruction()
+        + main_product_consistency_instruction
+        + "All five generated image types must depict the same single uploaded product and same product style identity. Do not switch to a different SKU, package variant, colorway, flavor, label design, logo layout, cap shape, bottle shape, accessory set, or material finish. Preserve color, material, texture, markings, proportions, and recognizable structure; do not lock to the uploaded 2D silhouette or camera angle. Remove non-product supports. Choose the product's orientation from its real structure, center of gravity, and normal display logic; do not mechanically force every product to stand upright. Re-place the product naturally with no floating, no tipping, no impossible balance, no intersection. "
     )
 
 
-def _certificate_background_instruction(product: dict[str, Any]) -> str:
-    if _is_large_certificate_product(product):
+def _certificate_background_instruction(product: dict[str, Any], project: dict[str, Any] | None = None) -> str:
+    if _is_large_certificate_product(product, project):
         return (
-            "Use a pure white background and flat white support; no environment, no props, no floor shadows, no tabletop contact shadow. "
-            "Keep clean product edges; no curved sweep backdrop, no gray gradient, no off-white texture, no speckled background noise. "
+            "Use a pure white background and flat white support; no environment, props, floor shadows, or tabletop contact shadow. "
+            "Keep clean product edges; no curved sweep backdrop, gray gradient, off-white texture, or speckled noise. "
         )
     return (
         "Use a pure white background and a single flat, level, uncurved horizontal plane with no horizon line, no wall, no window curtain, no visible table edge, no floor, no props, no desk accessories, no plants, no hands, and no unrelated objects. Keep clean product edges; do not add floor shadows; no tabletop contact shadow; no curved sweep backdrop, no concave or convex support surface, no gray gradient, no off-white texture, no speckled background noise, and no gray or beige shadow patch. "
     )
 
 
-def _certificate_placement_instruction(product: dict[str, Any]) -> str:
-    if _is_large_certificate_product(product):
+def _certificate_placement_instruction(product: dict[str, Any], project: dict[str, Any] | None = None) -> str:
+    if _is_large_certificate_product(product, project):
         return (
             "Large-product certificate scale rule: certificate about half the previous foreground visual size; "
             "place the certificate on top of the large product on a visible stable surface, fully visible and readable. "
             "Use camera about 0.5 meters from the product, 1.7 meters high, tilted downward about 30 degrees. "
-            "The certificate should look like a real card in the same camera shot, not a floating overlay or pasted layer. "
+            "Certificate must look like a real card in the same camera shot, not a floating overlay or pasted layer. "
         )
     return (
         "The certificate position is flexible: place it in a natural lower, side, foreground, or stable product-surface area where the full certificate face is visible and readable. readability has priority over making the certificate tiny. "
@@ -422,8 +495,8 @@ def _certificate_placement_instruction(product: dict[str, Any]) -> str:
     )
 
 
-def _certificate_view_instruction(product: dict[str, Any]) -> str:
-    if _is_large_certificate_product(product):
+def _certificate_view_instruction(product: dict[str, Any], project: dict[str, Any] | None = None) -> str:
+    if _is_large_certificate_product(product, project):
         return (
             "Use a close phone snapshot view, not a full top-down flat-lay and not a straight front view. "
             "Keep the final feeling as 真实自然的手机随手拍, not commercial studio product advertising. "
@@ -434,11 +507,69 @@ def _certificate_view_instruction(product: dict[str, Any]) -> str:
     )
 
 
-def _certificate_mode_prefix(product: dict[str, Any]) -> str:
-    if not _is_large_certificate_product(product):
+def _certificate_mode_prefix(product: dict[str, Any], project: dict[str, Any] | None = None) -> str:
+    if not _is_large_certificate_product(product, project):
         return ""
     return (
         "HARD LARGE-PRODUCT CERTIFICATE MODE. 大型商品模式已启用：不要全车或整机完整入镜，必须裁切商品，只展示局部特征。"
+    )
+
+
+def _product_logo_enabled(project: dict[str, Any]) -> bool:
+    style_config = project.get("style_config", {}) if isinstance(project.get("style_config", {}), dict) else {}
+    return bool(style_config.get("product_logo_enabled"))
+
+
+def _product_logo_fusion_instruction(project: dict[str, Any]) -> str:
+    if not _product_logo_enabled(project):
+        return ""
+    return (
+        "Product-logo fusion hard constraint: this is independent from any top-left brand-corner logo. "
+        "Product-surface logo is the primary requirement when product_logo_enabled is true; brand-corner logo does not satisfy product_logo_enabled. "
+        "When a logo reference image is provided and product_logo_enabled is true, one manufactured product-surface logo must appear on the product body itself as native printing, engraving, embossing, woven label, molded mark, or material-integrated marking. "
+        "The product itself must carry the logo; do not satisfy this requirement by placing a logo in the image corner, background, floating overlay, package, tag, watermark, or caption. "
+        "The product-surface logo copy must be fully visible, preserve the reference logo design, follow product perspective, surface curvature, material grain, local lighting, shadow, reflection, embossing or ink behavior, and occupy about 5% of the total visible product area. It must look manufactured on the product, not directly pasted on afterward. "
+    )
+
+
+def _main_product_logo_second_pass_instruction(product: dict[str, Any]) -> str:
+    name = _clean_text(product.get("name", "the product"))
+    return (
+        "Mandatory product-surface logo second pass. "
+        "Edit the generated main product image using the logo reference image as the second input. "
+        f"The visible product is {name}; keep the exact same product, pose, camera angle, background, lighting, and composition. "
+        "Add one manufactured product-surface logo onto a plausible visible product surface as native printing, engraving, embossing, woven label, molded mark, or material-integrated marking. "
+        "The product-surface logo is mandatory and must be clearly visible, preserve the reference logo design, follow product perspective, surface curvature, material grain, lighting, shadow, reflection, embossing or ink behavior, and occupy about 5% of the total visible product area. "
+        "Do not satisfy this by placing a logo in the image corner, background, floating overlay, package, tag, watermark, caption, or any non-product area. "
+        "Do not add, move, remove, crop, or change the top-left brand-corner logo. "
+        "Do not otherwise redesign the product or change any existing main-image content. "
+    )
+
+
+def _main_reference_scope_instruction() -> str:
+    return (
+        "Use only product appearance, structure, material, color, proportions, and product-surface logo from the reference. "
+        "Ignore the standalone top-left brand logo from the main image; it is not part of the product. "
+        "Do not render a standalone top-left brand logo in non-main outputs. "
+    )
+
+
+def _main_product_consistency_instruction() -> str:
+    return (
+        "Main-product reference hard constraint: product-surface logo must match the generated main product image. "
+        "Do not keep only a similar logo while changing the product body. "
+    )
+
+
+def _brand_logo_corner_instruction() -> str:
+    return (
+        " A brand logo reference image is provided as the second image. "
+        "This is the brand-corner logo function only; it is separate from the product-logo switch. "
+        "Mandatory brand-corner logo requirement: when this logo reference exists, one clean brand-logo copy must appear in the top-left corner of the main image. "
+        "Keep clear margin from the top and left edges; make the logo crisp, fully visible, readable, and separate from the product and background. "
+        "Preserve the exact reference logo design, proportions, colors, and transparency feel. "
+        "It must not be omitted, hidden, cropped, faded, blurred, merged into the background, or moved away from the top-left corner. "
+        "Do not redesign, duplicate, distort, or convert this top-left brand logo into a product-surface logo."
     )
 
 
@@ -514,11 +645,11 @@ def _package_product_pose_instruction(product: dict[str, Any]) -> str:
     )
 
     package_intro = (
-        "Place the appropriately sized package on the left and the product resting area nearby with natural retail-photo spacing. "
-        "The package may stand upright or sit at the natural package angle required by its referenced or product-appropriate structure. "
+        "Place the package on the left and product resting area nearby with natural spacing. "
+        "The package may stand upright or sit at its natural referenced or product-appropriate angle. "
         "This package orientation rule applies only to the package, never to the product. "
-        "For product placement only, preserve the uploaded product's identity, appearance, visible parts, materials, proportions, and structural relationships, not its original supported display position, camera viewpoint, or canvas orientation. "
-        "First remove every non-product object from the source reference, including stands, poles, bases, hooks, hangers, racks, mannequins, and invisible support; then choose the product pose from its real-world normal use orientation, normal resting orientation, designed functional contact surface, actual stable contact points, and center of gravity. "
+        "For product placement only, preserve product identity, appearance, visible parts, materials, proportions, and structural relationships, not original support pose, camera view, or canvas orientation. "
+        "First remove non-product objects including stands, poles, bases, hooks, hangers, racks, mannequins, and invisible support; then choose pose from real-world normal use orientation, normal resting orientation, designed functional contact surface, stable contact points, and center of gravity. "
     )
     stable_container_rule = (
         "For bottles, cans, cups, jars, and stable flat-bottom containers, the product should stand upright beside the package by default. "
@@ -590,33 +721,238 @@ def _format_fact_rows(rows: list[tuple[str, object]]) -> str:
     return "; ".join(parts) + ("." if parts else "no text facts.")
 
 
-def _detail_scene_plan(product: dict[str, Any]) -> str:
-    return (
-        "Infer four real usage scenarios from the uploaded product itself and the user-entered product facts; "
-        "they must be active-use-only primary-use moments; do not use preset scene categories or a fixed template. "
-        "Each scenario must show a genuinely different real use of this exact uploaded product."
-    )
+def _product_hint_text(product: dict[str, Any]) -> str:
+    return " ".join(
+        _clean_text(product.get(key, ""))
+        for key in ("name", "brand", "model", "category")
+    ).lower()
 
-# 共享四场景规划层
+
+def _detail_locked_usage_scenes(product: dict[str, Any]) -> list[dict[str, str]]:
+    hint = _product_hint_text(product)
+
+    scene_sets: list[tuple[tuple[str, ...], list[dict[str, str]]]] = [
+        (
+            ("摩托", "机车", "motorcycle", "bike", "骑行"),
+            [
+                {
+                    "title": "城市骑行",
+                    "subtitle": "通勤路面使用",
+                    "place": "城市道路",
+                    "environment": "urban commuting road with moving traffic context",
+                    "elements": "road lane, rider posture, city roadside, motion direction",
+                },
+                {
+                    "title": "长途旅行",
+                    "subtitle": "远途道路出行",
+                    "place": "公路沿线",
+                    "environment": "open-distance touring route with travel landscape",
+                    "elements": "highway shoulder, travel luggage context, distant horizon, route markers",
+                },
+                {
+                    "title": "山路骑行",
+                    "subtitle": "弯道地形行驶",
+                    "place": "山路",
+                    "environment": "mountain or winding-road riding environment",
+                    "elements": "curved road, slope terrain, protective riding action, natural background",
+                },
+                {
+                    "title": "载物出行",
+                    "subtitle": "日常运输使用",
+                    "place": "街道",
+                    "environment": "practical transport route with cargo or passenger-use context",
+                    "elements": "secured load context, street-side movement, utilitarian route, real traffic spacing",
+                },
+            ],
+        ),
+        (
+            ("柜", "柜子", "文件柜", "储物柜", "档案柜", "cabinet", "locker", "storage"),
+            [
+                {
+                    "title": "资料调阅",
+                    "subtitle": "文档取放场景",
+                    "place": "办公室",
+                    "environment": "document access area where records are actively retrieved",
+                    "elements": "standing access path, opened document area, user reach action, organized records context",
+                },
+                {
+                    "title": "档案管理",
+                    "subtitle": "归档分类使用",
+                    "place": "档案室",
+                    "environment": "records management area with sorting workflow",
+                    "elements": "classification workflow, labeled folders, sorting surface, archive handling action",
+                },
+                {
+                    "title": "前台存取",
+                    "subtitle": "服务资料调用",
+                    "place": "前台",
+                    "environment": "service counter area where staff access stored materials",
+                    "elements": "counter workflow, service staff movement, request handoff, reception-side background",
+                },
+                {
+                    "title": "库房查找",
+                    "subtitle": "库存记录核对",
+                    "place": "库房",
+                    "environment": "back-room inventory record checking area",
+                    "elements": "inventory checklist, storage aisle, verification action, utility lighting",
+                },
+            ],
+        ),
+        (
+            ("露营", "户外", "camp", "outdoor"),
+            [
+                {
+                    "title": "营地使用",
+                    "subtitle": "户外活动展开",
+                    "place": "营地",
+                    "environment": "active outdoor camp setup area",
+                    "elements": "ground setup zone, activity gear spacing, seated group use, natural terrain",
+                },
+                {
+                    "title": "途中休整",
+                    "subtitle": "行程暂停使用",
+                    "place": "休息区",
+                    "environment": "travel rest-stop outdoor environment",
+                    "elements": "temporary rest area, route-side pause, compact gear layout, daylight travel context",
+                },
+                {
+                    "title": "野外备餐",
+                    "subtitle": "临时操作台面",
+                    "place": "野外营地",
+                    "environment": "outdoor food-preparation or task-support environment",
+                    "elements": "prep workflow, utility surface, arranged supplies, practical hand action",
+                },
+                {
+                    "title": "活动集结",
+                    "subtitle": "多人协作使用",
+                    "place": "活动场地",
+                    "environment": "group activity base environment",
+                    "elements": "team gathering space, shared-use layout, open field spacing, organized activity context",
+                },
+            ],
+        ),
+        (
+            ("耳机", "鼠标", "键盘", "充电", "电源", "电子", "headphone", "mouse", "keyboard", "charger", "power"),
+            [
+                {
+                    "title": "桌面工作",
+                    "subtitle": "专注操作使用",
+                    "place": "办公桌",
+                    "environment": "focused desktop work environment",
+                    "elements": "single-user task posture, desk workflow, screen-side context, controlled indoor light",
+                },
+                {
+                    "title": "移动携带",
+                    "subtitle": "出行随身使用",
+                    "place": "候车区",
+                    "environment": "portable use during personal travel",
+                    "elements": "bag or hand-carry context, transit waiting space, compact handling, movement-ready setup",
+                },
+                {
+                    "title": "会议协作",
+                    "subtitle": "多人沟通使用",
+                    "place": "会议室",
+                    "environment": "collaborative meeting or communication environment",
+                    "elements": "shared table context, speaking/listening action, meeting materials, group spacing",
+                },
+                {
+                    "title": "学习练习",
+                    "subtitle": "个人训练使用",
+                    "place": "书房",
+                    "environment": "personal study or practice environment",
+                    "elements": "focused learner posture, learning materials, quiet task area, repeat-use setup",
+                },
+            ],
+        ),
+    ]
+
+    for tokens, scenes in scene_sets:
+        if any(token in hint for token in tokens):
+            return scenes
+
+    name = _clean_text(product.get("name", "product"))
+    return [
+        {
+            "title": "核心使用",
+            "subtitle": "主要任务发生",
+            "place": "使用现场",
+            "environment": f"primary active-use place for {name}",
+            "elements": "goal A, user A, props A, light A",
+        },
+        {
+            "title": "协作使用",
+            "subtitle": "多人流程发生",
+            "place": "协作场地",
+            "environment": f"collaborative active-use place for {name}",
+            "elements": "goal B, user B, props B, light B",
+        },
+        {
+            "title": "移动使用",
+            "subtitle": "位置变化发生",
+            "place": "移动现场",
+            "environment": f"mobile active-use place for {name}",
+            "elements": "goal C, user C, props C, light C",
+        },
+        {
+            "title": "专业使用",
+            "subtitle": "规范操作发生",
+            "place": "专业场所",
+            "environment": f"specialized active-use place for {name}",
+            "elements": "goal D, user D, props D, light D",
+        },
+    ]
+
+
+def _format_detail_locked_usage_scene_plan(product: dict[str, Any]) -> str:
+    scenes = _detail_locked_usage_scenes(product)
+    render_styles = [
+        "wide documentary, 28mm, warm morning, open frame",
+        "architecture context, 35mm, cool daylight, ordered frame",
+        "close environment process, 50mm, side light, shallow depth",
+        "high-angle establishing, 24mm, dusk mixed light, deep layers",
+    ]
+    lines = []
+    for index, scene in enumerate(scenes, start=1):
+        render_style = render_styles[index - 1]
+        place = scene.get("place") or scene["environment"]
+        lines.append(
+            f"Scene {index} final: place: {place}; "
+            f"env: {scene['environment']}; locked elements: {scene['elements']}; "
+            f"render style: {render_style}; "
+            f"caption place: {place}; scene text: {place}."
+        )
+    return " ".join(lines) + " "
+
+
 def _detail_shared_scene_plan(product: dict[str, Any]) -> str:
+    facts = _format_fact_rows(
+        [
+            ("p", product.get("name", "")),
+            ("cat", product.get("category", "")),
+            ("m", product.get("model", "")),
+        ]
+    )
     return (
         "Shared product-specific four-scene plan: "
-        "Active-use-only rule: every scene must show the product being used for its primary purpose. "
-        "Scene 1: infer the most natural real use of this exact uploaded product. "
-        "Scene 2: infer a second real use with a different user purpose. "
-        "Scene 3: infer a third real use with a different real environment. "
-        "Scene 4: infer a fourth active use with a different user goal. "
+        "Fixed four-scene usage plan derived once before image generation. "
+        "Scene plan caption-text hard constraint: every scene text in this locked plan must be only a place name, not a use purpose, action, selling point, or descriptive phrase. "
+        f"Product facts used for this locked plan: {facts} "
+        f"{_format_detail_locked_usage_scene_plan(product)}"
+        "Usage-scene fit hard constraint: real primary-use situation for this product category and product information; do not force the product itself to appear; no generic lifestyle, decorative display, storage, prep, maintenance, repair, cleaning, packaging, or unrelated scene. Active-use-only rule. "
+        "Scene 1 locked: distinct real environment type, real product-appropriate context, unique user group, unique institution or place category. "
+        "Scene 2 locked: different environment type, different real environment, different active-use goal, different props/action, different user group, different institution or place category. "
+        "Scene 3 locked: third environment type, different active-use moment and spatial context, different user group, different institution or place category. "
+        "Scene 4 locked: fourth environment type, different camera distance, props, lighting, background, different user group, different institution or place category. "
+        "Do not reinterpret, rename, merge, swap, or regenerate these four scenes later. "
         "For vehicles and motorcycles, usage scenes must show riding, driving, commuting, travel, road, terrain, passenger, or cargo use. "
-        "Do not use maintenance, upkeep, repair, cleaning, inspection, storage, display, after-sales, disassembly, charging, packaging, or unboxing as usage scenes unless this product is itself a tool for that job. "
-        "不要把保养、维修、清洁、检查、仓储、陈列、售后、拆装、充电、包装或开箱当作使用场景，除非商品本身就是对应工具。 "
-        "Do not choose these from preset categories; derive all four from this product's real capabilities. "
+        "Do not use maintenance, upkeep, repair, cleaning, inspection, storage, display, after-sales, disassembly, charging, packaging, or unboxing as usage scenes. "
+        "不要把保养、维修、清洁、检查、仓储、陈列、售后、拆装、充电、包装或开箱当作使用场景。 "
     )
 
 
 def _detail_module_prompts(product: dict[str, Any]) -> list[str]:
     name = product.get("name", "the uploaded product")
     brand = _clean_text(product.get("brand", ""))
-    scene_plan = _detail_scene_plan(product)
     shared_scene_plan = _detail_shared_scene_plan(product)
     fact_text = _format_fact_rows(
         [
@@ -625,37 +961,56 @@ def _detail_module_prompts(product: dict[str, Any]) -> list[str]:
         ]
     )
     base = (
-        "Use the uploaded product photo as the same single uploaded product reference. Preserve its real perspective, visible surfaces, label angle, seams, logo placement, color, material, scale, silhouette, and finish; do not force a generic front view. "
-        "All modules must match the same product style identity. Do not switch SKU, variant, colorway, label design, logo layout, cap shape, bottle shape, accessories, or material finish. The exact same visible product logo and every visible marking must remain consistent. "
-        "For every close-up, bottom view, top view, side view, macro crop, inset, and full-product view, the product must share the same structure, geometry, proportions, material, texture, color, seams, edges, bevels, labels, logo position, and visible markings as the main product image. "
+        "same single uploaded product reference. "
+        f"{_main_reference_scope_instruction()}"
+        f"{_main_product_consistency_instruction()}"
+        "exact same visible product logo. "
+        "For every close-up, bottom view, top view, side view, macro crop, inset, and full-product view, product must share the same structure, geometry, proportions, material, texture, color, seams, edges, bevels, labels, logo position, and visible markings. "
         "Do not invent a different bottom, underside, lid, cap, base, anti-slip pad, connector, label, badge, logo placement, surface pattern, display stand, support pole, base, hanger, rack, mannequin, or non-product support hardware. "
-        "If a part of the product is not visible in the uploaded reference, infer only a physically plausible continuation without adding readable logos, brand marks, labels, icons, decorative rings, or new surface features. Partial views must not conflict with full views: preserve visible logos, base/rim shape, seam count, texture direction, posture, and material finish. "
-        "Preserve any tiny registered trademark symbol beside the logo in every logo-side product view. "
-        "Create one finished ecommerce detail section image with integrated layout and any needed Chinese text inside the generated image itself. "
-        f"Use exact non-empty user-entered product facts where relevant: {fact_text} "
-        "For absent facts, omit labels and placeholders; do not invent structured specifications. Do not render rows, table entries, labels, or placeholder text for absent fields. Visual feature copy must not present inferred values as structured specifications. Visual feature illustrations may only come from the uploaded product appearance. "
-        "Do not add logos that are not on the product, machine-readable codes, watermarks, or certificate-like labels. "
+        "If a part of the product is not visible in the uploaded reference, infer only a physically plausible continuation without adding readable logos, brand marks, labels, icons, decorative rings, or new surface features. "
+        "tiny registered trademark symbol. "
+        "finished ecommerce detail section. "
+        "must not present inferred values as structured specifications. Do not render rows, table entries, labels, or placeholder text for absent fields. "
     )
     clean_module_environment_instruction = (
         "Keep the product on a plain white or very light neutral background and avoid scene props: no laptop, no books, no pen, no plant, no hands, no other containers, and no unrelated objects. "
     )
+    ecommerce_hero_instruction = (
+        "Create an ecommerce promotional hero section, not a plain product-only cutout. "
+        "Show the product accurately and prominently with ecommerce visual effects, layered background accents, selling-point badges, marketing text callouts, and short Chinese promotional copy around the product. "
+        "Use polished commerce-poster composition with clear hierarchy, enough blank space, premium lighting, and product-related visual explanation. "
+        "Do not invent unsupported specifications, measurements, certifications, or material claims; base all text on visible product traits and provided product facts only. "
+    )
     usage_scene_environment_instruction = (
-        "Use realistic usage environments and category-appropriate context props, while keeping the product visually dominant and consistent with the uploaded reference. "
-        "Do not add readable product facts, labels, brands, sizes, quantities, or claims that conflict with the exact user-entered product facts. "
+        "Use realistic usage environments. Environment-first scene rule: main subject of each scene should be the realistic place where this product is normally used, installed, accessed, or naturally appears. "
+        "Usage scenes are environment-context images, not product display images. Do not center, enlarge, or hero-render the product. "
+        "Product absence hard constraint: Do not render the product itself in usage-scene panels; show only the realistic environment where the product could reasonably be used. "
+        "Do not show the product as small, partial, distant, reflected, cropped, background, silhouette, icon, package, poster, label, screen image, or repeated visual motif. "
+        "使用场景图以真实使用环境为主。 "
+    )
+    shared_scene_caption_style = (
+        "Shared scene-caption style: Caption style hard constraint. Scene 1-4 captions must use identical font style, size, weight, color, placement, label shape, spacing, and short Chinese wording. "
+        "Captions must never be only Scene 1, Scene 2, Scene 3, or Scene 4. Scene caption text rule: use only the application place name matching the locked scene environment. Render one short Chinese location label only, location or place noun only. Do not include usage purpose, user action, selling point, product function, or descriptive phrase. Do not include verbs or use-purpose words. No subtitle, no slogan, no sentence, no feature claim, no long explanation. "
+        "Use one identical caption block template for all four captions; must strictly reuse this exact caption block template; same background or label box, opacity, padding, alignment, line height, and corner radius. Exact template: bottom-left of each scene panel; semi-transparent charcoal black rgba(20,20,20,0.68); text color pure white #FFFFFF; clean bold Chinese Heiti/Sans-serif; single label size 22-26px equivalent; border radius 6-8px; padding 12-16px. "
+        "Caption wording hard constraint: caption style must stay identical, but caption text must be different for each scene. Every scene-name label must be different. Never reuse identical caption wording across Scene 1, Scene 2, Scene 3, and Scene 4. "
+        "Never change the caption block style between Scene 1, Scene 2, Scene 3, and Scene 4. Do not vary caption typography between scenes. "
     )
     four_scene_exclusivity_instruction = (
-        f"Exactly four category-appropriate usage scenes across two generated images: {scene_plan} "
         f"{shared_scene_plan}"
-        "Scene allocation is fixed across the two usage-scene images. The four scenes must be mutually exclusive and genuinely different real camera moments, not a fixed template. Do not reuse the same environment, props, action, camera angle, composition, lighting, caption, or background with small changes. "
-        "Lay out exactly two aligned real-world usage scenes left-to-right; do not stack them top-to-bottom. Never reuse, recolor, crop, mirror, or rearrange a scene; do not duplicate or invent a fifth scene. "
+        f"{shared_scene_caption_style}"
+        "Detail usage-scene hard constraints: product-fit, complete four-scene uniqueness, identical caption style, and different caption text are mandatory. "
+        "Scene allocation is fixed across the two usage-scene images. Use only the locked scene descriptions listed above. Four-scene uniqueness hard constraint: Scene 1, Scene 2, Scene 3, and Scene 4 must be completely different use cases and completely different environment types; user goal, environment, props, user action, camera angle, composition, lighting, background, and caption wording must differ. Duplicate-scene absolute ban: No two scenes may share the same place type, room type, institution type, user group, activity purpose, environment category, visible props, furniture, tools, vehicles, landscape elements, architectural elements, signage style, or background objects. If two scenes could receive the same short caption or the same environment label, regenerate one of them. Difference-scale hard constraint: indoor/outdoor status, public/private context, camera distance, lens feel, lighting color temperature, time of day, color palette, and render style must be different for Scene 1, Scene 2, Scene 3, and Scene 4. Shared-element limit hard constraint: any two scenes may share at most 10% of visible elements; at least 90% of environment, props, action, camera angle, composition, lighting, background, and caption wording must differ. The four scenes must be mutually exclusive, genuinely different real camera moments. Do not reuse the same environment, props, action, camera angle, composition, lighting, caption, or background with small changes. "
+        "Lay exactly two aligned real-world usage scenes left-to-right; no duplicate/fifth. "
     )
     first_usage_scene_assignment = (
         f"This image may contain Scene 1 and Scene 2 only. Do not include Scene 3 or Scene 4 in this image. "
-        "Scene 1 and Scene 2 must be chosen from the product-specific four-scene plan, based on two different real uses of the exact uploaded product. "
+        "Scene 1 and Scene 2 must be chosen from the product-specific four-scene plan. "
     )
     second_usage_scene_assignment = (
         f"This image may contain Scene 3 and Scene 4 only. Do not include Scene 1 or Scene 2 in this image. "
-        "Scene 3 and Scene 4 must be chosen from the product-specific four-scene plan, based on two additional real uses of the exact uploaded product. "
+        "Scene 3 and Scene 4 must be chosen from the product-specific four-scene plan. "
+        "Forbidden carry-over from the previous usage-scene image: do not reuse Scene 1 or Scene 2. "
+        "Do not repeat their environment, props, user action, camera angle, composition, lighting, caption wording, or background. "
     )
     first_brand_instruction = (
         f"Use the brand only in this first detail module as large standard printed Chinese brand text, brand: {brand}. Place the brand in the upper-left corner of the first detail module. "
@@ -666,13 +1021,19 @@ def _detail_module_prompts(product: dict[str, Any]) -> list[str]:
         else "Do not add a brand wordmark because the user did not enter a brand. "
     )
     no_repeat_brand_instruction = (
-        "Do not repeat the brand name or brand wordmark as readable text in this section; only preserve visible product logos or markings that physically exist on the uploaded product. "
+        "Do not repeat the brand name; preserve logos/markings. "
+    )
+    detail_feature_display_instruction = (
+        "Create a generic product detail feature display section that must include Chinese text labels. "
+        "Show multiple close-up panels, macro crops, cut-in views, or inset cards of real visible product details such as material texture, surface finish, structure, hardware, craftsmanship, capacity, usage feature, or other visible category-appropriate details. "
+        "Text labels should be concise Chinese feature labels tied to the shown detail. "
+        "Do not invent unsupported specifications, measurements, certifications, or material claims; do not turn this into a pure product hero image. "
     )
     return [
-        base + clean_module_environment_instruction + first_brand_instruction + f"detail module: product hero finished ecommerce detail section for {name}. Strong opening banner, complete product facing the same branded side as the source image, clean premium ecommerce style.",
-        base + usage_scene_environment_instruction + four_scene_exclusivity_instruction + first_usage_scene_assignment + no_repeat_brand_instruction + f"detail module: usage scene section 1 of 2 for {name}. Create the first two of the four product-appropriate usage scenes shown in this detail image set, with a left-right horizontal layout and short scene captions, ensuring each scene matches the product's real use and differs from the other scenes in environment, props, lighting, and framing.",
-        base + usage_scene_environment_instruction + four_scene_exclusivity_instruction + second_usage_scene_assignment + no_repeat_brand_instruction + f"detail module: usage scene section 2 of 2 for {name}. Create the last two of the four product-appropriate usage scenes shown in this detail image set, with a left-right horizontal layout and short scene captions, ensuring each scene matches the product's real use and differs from the earlier scenes in environment, props, lighting, and framing.",
-        base + clean_module_environment_instruction + no_repeat_brand_instruction + f"detail module: structure and scale visual reference finished ecommerce detail section for {name}. Product angles, structural details, and visual scale cues may be integrated when they come from the uploaded product appearance, while preserving the exact logo and registered mark on every visible product.",
+        base + ecommerce_hero_instruction + first_brand_instruction + f"detail module: product hero ecommerce promotional hero section for {name}. Strong opening banner, complete product facing the same branded side as the source image, ecommerce promotional style with effects and text.",
+        base + usage_scene_environment_instruction + four_scene_exclusivity_instruction + first_usage_scene_assignment + no_repeat_brand_instruction + f"detail module: usage scene section 1 of 2 for {name}. Scene 1 and Scene 2 left-to-right.",
+        base + usage_scene_environment_instruction + four_scene_exclusivity_instruction + second_usage_scene_assignment + no_repeat_brand_instruction + f"detail module: usage scene section 2 of 2 for {name}. Scene 3 and Scene 4 left-to-right.",
+        base + clean_module_environment_instruction + no_repeat_brand_instruction + detail_feature_display_instruction + f"detail module: generic product detail feature display section finished ecommerce detail section for {name}. Preserve the exact logo and registered mark on every visible product detail.",
     ]
 
 

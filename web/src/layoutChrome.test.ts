@@ -6,21 +6,40 @@ const css = readFileSync(resolve(__dirname, "App.css"), "utf8");
 const appSource = readFileSync(resolve(__dirname, "App.tsx"), "utf8");
 
 describe("layout chrome", () => {
-  it("hides visible layout scrollbars across the workbench", () => {
-    expect(css).toContain("scrollbar-width: none");
-    expect(css).toContain("::-webkit-scrollbar");
-    expect(css).toContain("display: none");
+  it("keeps global page scrolling visible instead of hiding every scrollbar", () => {
+    expect(css).toContain("overflow-y: auto");
+    expect(css).not.toMatch(/\*\s*\{[^}]*scrollbar-width:\s*none/s);
+    expect(css).not.toMatch(/\*::-webkit-scrollbar\s*\{[^}]*display:\s*none/s);
   });
 
-  it("keeps the configuration rail scrollable without showing a scrollbar", () => {
-    expect(css).toMatch(/\.config-rail\s*\{[^}]*overflow-y:\s*auto/s);
-    expect(css).toMatch(/\.config-rail\s*\{[^}]*scrollbar-width:\s*none/s);
+  it("uses page-level home scrolling instead of an independently scrolling configuration rail", () => {
+    const configRail = css.slice(css.indexOf(".config-rail {"), css.indexOf("}", css.indexOf(".config-rail {")));
+    expect(configRail).not.toContain("position: sticky");
+    expect(configRail).not.toContain("max-height");
+    expect(configRail).not.toContain("overflow-y: auto");
+    expect(configRail).toContain("align-self: start");
+    expect(css).toContain("overflow-y: auto");
+  });
+
+  it("keeps the home workbench compact enough to avoid over-wide panels", () => {
+    expect(css).toMatch(/\.workbench-grid\s*\{[^}]*grid-template-columns:\s*minmax\(320px,\s*2fr\) minmax\(0,\s*3fr\)/s);
+    expect(css).toMatch(/\.upload-preview-card\s*\{[^}]*min-height:\s*168px/s);
+    expect(css).toMatch(/\.upload-preview-image\s*\{[^}]*height:\s*168px/s);
+    expect(css).toMatch(/\.pipeline-panel\s*\{[^}]*min-height:\s*188px/s);
+    expect(css).toMatch(/\.pipeline-copy h2\.ant-typography\s*\{[^}]*font-size:\s*36px/s);
   });
 
   it("renders only the current topbar page navigation", () => {
     expect(appSource).toContain('<nav className="topbar-nav"');
-    expect(appSource).toContain("首页");
-    expect(appSource).toContain("图库");
+    const topbarNav = appSource.slice(
+      appSource.indexOf('<nav className="topbar-nav"'),
+      appSource.indexOf("</nav>", appSource.indexOf('<nav className="topbar-nav"')),
+    );
+    expect(topbarNav).toContain("首页");
+    expect(topbarNav).toContain("单图");
+    expect(topbarNav).toContain("图库");
+    expect(topbarNav.indexOf("首页")).toBeLessThan(topbarNav.indexOf("单图"));
+    expect(topbarNav.indexOf("单图")).toBeLessThan(topbarNav.indexOf("图库"));
     expect(appSource).not.toContain('href="#config">配置');
     expect(appSource).not.toContain('href="#pipeline">流程');
     expect(appSource).not.toContain('href="#outputs">输出');

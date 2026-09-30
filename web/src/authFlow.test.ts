@@ -5,6 +5,8 @@ describe("authFlow", () => {
   it("maps backend registration code failures to actionable messages", () => {
     expect(authErrorMessage(new Error("EMAIL_CODE_INVALID: invalid"))).toContain("验证码");
     expect(authErrorMessage(new Error("EMAIL_DOMAIN_UNSUPPORTED: unsupported"))).toContain("邮箱");
+    expect(authErrorMessage(new Error("PHONE_CODE_INVALID: invalid"))).toContain("验证码");
+    expect(authErrorMessage(new Error("INVITATION_CODE_INVALID: invalid"))).toContain("邀请码");
   });
 
   it("maps invalid login credentials to a short message", () => {

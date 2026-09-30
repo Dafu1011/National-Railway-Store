@@ -87,6 +87,29 @@ class KeleProviderTests(unittest.TestCase):
         self.assertEqual(call["n"], 1)
         self.assertEqual(Path(call["image"][0].name).name, "product.png")
 
+    def test_generate_image_uses_prompt_only_generation_endpoint(self):
+        expected_png = b"\x89PNG\r\n\x1a\nkele-generate-image"
+        images = FakeImages(SimpleNamespace(data=[SimpleNamespace(b64_json=b64encode(expected_png).decode("ascii"))]))
+        provider = KeleGptImage2Provider(
+            KeleConfig(
+                base_url="https://code28.ccwu.cc/v1",
+                api_key="test-key",
+                model="gpt-image-2",
+            ),
+            client_factory=lambda **_kwargs: FakeOpenAIClient(images),
+        )
+
+        result = provider.generate_image(prompt="create a clean product poster", size="1024x1024")
+
+        self.assertEqual(result, expected_png)
+        self.assertEqual(images.edit_calls, [])
+        self.assertEqual(len(images.calls), 1)
+        call = images.calls[0]
+        self.assertEqual(call["model"], "gpt-image-2")
+        self.assertEqual(call["prompt"], "create a clean product poster")
+        self.assertEqual(call["size"], "1024x1024")
+        self.assertEqual(call["n"], 1)
+
     def test_rejects_missing_api_key_before_openai_client_call(self):
         calls = 0
 

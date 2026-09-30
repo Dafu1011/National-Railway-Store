@@ -11,11 +11,13 @@ import {
   List,
   Modal,
   Progress,
+  Radio,
   Row,
   Segmented,
   Select,
   Space,
   Statistic,
+  Switch,
   Tag,
   Typography,
   Upload,
@@ -43,7 +45,7 @@ import {
   Wand2,
   Workflow,
 } from "lucide-react";
-import { apiDownload, apiGet, apiPost, apiPutRaw } from "./api/client";
+import { apiDelete, apiDownload, apiGet, apiPost, apiPutRaw } from "./api/client";
 import { barcodeValidationMessage, suggestedBarcodeValue, type BarcodeValidationResponse } from "./barcodeValidation";
 import { generationProgress, nextLiveGenerationProgress } from "./generationProgress";
 import { buildProjectCreatePayload } from "./generationPayload";
@@ -121,15 +123,33 @@ type GenerationResponse = {
   outputs: OutputResponse[];
 };
 
+type SingleImageJobResponse = {
+  id: string;
+  status: string;
+  provider_name: string;
+  prompt: string;
+  reference_asset_count: number;
+  error_code?: string | null;
+  error_message?: string | null;
+  outputs: OutputResponse[];
+};
+
 type ProjectOutputsResponse = {
   items: OutputResponse[];
   next_cursor?: string | null;
+};
+
+type SingleReferenceImage = {
+  id: string;
+  file: File;
+  previewUrl: string;
 };
 
 type AccountResponse = {
   user: {
     id: string;
     email: string;
+    phone?: string;
     username: string;
   };
   username: string;
@@ -158,7 +178,8 @@ type AccountTransactionsResponse = {
 
 type LoginValues = {
   username: string;
-  email: string;
+  phone: string;
+  invitationCode: string;
   verificationCode: string;
   password: string;
   newPassword: string;
@@ -172,11 +193,14 @@ type ProductFormValues = ProductPayloadValues & {
   inspector: string;
   barcodeType: "EAN_13" | "EAN_8" | "UPC_A" | "CODE_128";
   barcodeValue: string;
+  productLogoEnabled: boolean;
+  productVolume: "large" | "small";
 };
 
 const loginInitialValues: LoginValues = {
   username: "",
-  email: "",
+  phone: "",
+  invitationCode: "",
   verificationCode: "",
   password: "",
   newPassword: "",
@@ -193,6 +217,8 @@ const productInitialValues: ProductFormValues = {
   inspector: "QC-01",
   barcodeType: "EAN_13",
   barcodeValue: "",
+  productLogoEnabled: false,
+  productVolume: "small",
 };
 
 const outputName: Record<string, string> = {
@@ -201,13 +227,14 @@ const outputName: Record<string, string> = {
   package: "商品与包装箱图",
   detail: "商品详情图",
   scene: "商品细节实拍图",
+  single: "单图生成",
 };
 const galleryPageLimit = 30;
 
 export function App() {
   usePointerGlow();
   const [token, setToken] = useState("");
-  const [userEmail, setUserEmail] = useState("");
+  const [userPhone, setUserPhone] = useState("");
   const [username, setUsername] = useState("");
   const [authChecking, setAuthChecking] = useState(true);
 
@@ -219,7 +246,7 @@ export function App() {
       }
       if (auth) {
         setToken(auth.access_token);
-        setUserEmail(auth.user.email);
+        setUserPhone(auth.user.phone || auth.user.email);
         setUsername(auth.user.username || "");
       }
       setAuthChecking(false);
@@ -240,7 +267,7 @@ export function App() {
         return;
       }
       setToken(auth.access_token);
-      setUserEmail(auth.user.email);
+      setUserPhone(auth.user.phone || auth.user.email);
       setUsername(auth.user.username || "");
     }
     const intervalId = window.setInterval(refreshSession, 6 * 60 * 60 * 1000);
@@ -264,13 +291,13 @@ export function App() {
 
   function handleAuthenticated(auth: AuthResponse) {
     setToken(auth.access_token);
-    setUserEmail(auth.user.email);
+    setUserPhone(auth.user.phone || auth.user.email);
     setUsername(auth.user.username || "");
   }
 
   function logout() {
     setToken("");
-    setUserEmail("");
+    setUserPhone("");
     setUsername("");
   }
 
@@ -285,7 +312,7 @@ export function App() {
         path="/generate"
         element={
           <ProtectedRoute token={token}>
-            <GeneratePage token={token} username={username} userEmail={userEmail} onLogout={logout} />
+            <GeneratePage token={token} username={username} userPhone={userPhone} onLogout={logout} />
           </ProtectedRoute>
         }
       />
@@ -388,12 +415,18 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (auth: AuthResponse) 
     setLoading(true);
     try {
       if (mode === "register") {
-        const auth = await registerAccount(values.username, values.email, values.verificationCode, values.password);
+        const auth = await registerAccount(
+          values.username,
+          values.phone,
+          values.invitationCode,
+          values.verificationCode,
+          values.password,
+        );
         onAuthenticated(auth);
         message.success("注册成功，已进入生成台");
         return;
       }
-      const auth = await apiPost<AuthResponse>("/auth/login", { email: values.email, password: values.password });
+      const auth = await apiPost<AuthResponse>("/auth/login", { phone: values.phone, password: values.password });
       onAuthenticated(auth);
       message.success("登录成功");
     } catch (error) {
@@ -407,10 +440,10 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (auth: AuthResponse) 
     if (resendCountdown > 0) {
       return;
     }
-    const email = await form.validateFields(["email"]).then((values) => values.email);
+    const phone = await form.validateFields(["phone"]).then((values) => values.phone);
     setSendingCode(true);
     try {
-      await requestRegistrationCode(email);
+      await requestRegistrationCode(phone);
       setHasSentRegistrationCode(true);
       setResendCountdown(60);
       message.success("验证码已发送，请注意查收");
@@ -425,13 +458,13 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (auth: AuthResponse) 
     if (resendCountdown > 0) {
       return;
     }
-    const email = await form.validateFields(["email"]).then((values) => values.email);
+    const phone = await form.validateFields(["phone"]).then((values) => values.phone);
     setSendingCode(true);
     try {
-      await requestPasswordResetCode(email);
+      await requestPasswordResetCode(phone);
       setHasSentResetCode(true);
       setResendCountdown(60);
-      message.success("验证码已发送，请查看邮箱");
+      message.success("验证码已发送，请查看手机短信");
     } catch (error) {
       message.error(authErrorMessage(error));
     } finally {
@@ -442,7 +475,7 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (auth: AuthResponse) 
   async function resetPasswordWithCode(values: LoginValues) {
     setLoading(true);
     try {
-      await resetPassword(values.email, values.verificationCode, values.newPassword);
+      await resetPassword(values.phone, values.verificationCode, values.newPassword);
       message.success("密码已重置，请使用新密码登录");
       setAuthMode("login");
       form.setFieldsValue({ password: "", newPassword: "", verificationCode: "" });
@@ -522,17 +555,22 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (auth: AuthResponse) 
               </Form.Item>
             ) : null}
             <Form.Item
-              name="email"
-              label="邮箱"
+              name="phone"
+              label="手机号"
               rules={[
-                { required: true, message: "请输入邮箱" },
-                { type: "email", message: "请输入正确的邮箱地址" },
+                { required: true, message: "请输入手机号" },
+                { pattern: /^\d{6,20}$/, message: "请输入正确的手机号" },
               ]}
             >
-              <Input size="large" autoComplete="email" />
+              <Input size="large" inputMode="tel" autoComplete="tel" />
             </Form.Item>
+            {authMode === "register" ? (
+              <Form.Item name="invitationCode" label="邀请码" rules={[{ required: true, whitespace: true, message: "请输入邀请码" }]}>
+                <Input size="large" autoComplete="off" />
+              </Form.Item>
+            ) : null}
             {authMode !== "login" ? (
-              <Form.Item name="verificationCode" label="邮箱验证码" rules={[{ required: true, message: "请输入邮箱验证码" }]}>
+              <Form.Item name="verificationCode" label="短信验证码" rules={[{ required: true, message: "请输入短信验证码" }]}>
                 <Space.Compact className="full-width">
                   <Input size="large" maxLength={6} inputMode="numeric" autoComplete="one-time-code" />
                   <Button
@@ -593,17 +631,17 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (auth: AuthResponse) 
 function GeneratePage({
   token,
   username,
-  userEmail,
+  userPhone,
   onLogout,
 }: {
   token: string;
   username: string;
-  userEmail: string;
+  userPhone: string;
   onLogout: () => void;
 }) {
   const { message } = AntdApp.useApp();
   const [form] = Form.useForm<ProductFormValues>();
-  const [activeWorkbenchPage, setActiveWorkbenchPage] = useState<"home" | "gallery" | "account">("home");
+  const [activeWorkbenchPage, setActiveWorkbenchPage] = useState<"home" | "single" | "gallery" | "account">("home");
   const [productImage, setProductImage] = useState<File | null>(null);
   const [productImagePreviewUrl, setProductImagePreviewUrl] = useState("");
   const [logoImage, setLogoImage] = useState<File | null>(null);
@@ -623,6 +661,12 @@ function GeneratePage({
   const [galleryCursor, setGalleryCursor] = useState<string | null>(null);
   const [galleryPageCursors, setGalleryPageCursors] = useState<(string | null)[]>([null]);
   const [galleryPageIndex, setGalleryPageIndex] = useState(0);
+  const [singlePrompt, setSinglePrompt] = useState("");
+  const [singleReferences, setSingleReferences] = useState<SingleReferenceImage[]>([]);
+  const [singleJob, setSingleJob] = useState<SingleImageJobResponse | null>(null);
+  const [singlePreviews, setSinglePreviews] = useState<PreviewImage[]>([]);
+  const [singleLoading, setSingleLoading] = useState(false);
+  const [singleError, setSingleError] = useState("");
   const [account, setAccount] = useState<AccountResponse | null>(null);
   const [accountTransactions, setAccountTransactions] = useState<AccountTransaction[]>([]);
   const [accountLoading, setAccountLoading] = useState(false);
@@ -710,6 +754,10 @@ function GeneratePage({
   }, [previews]);
 
   useEffect(() => {
+    return () => singlePreviews.forEach((preview) => URL.revokeObjectURL(preview.url));
+  }, [singlePreviews]);
+
+  useEffect(() => {
     if (!productImagePreviewUrl) {
       return;
     }
@@ -753,6 +801,16 @@ function GeneratePage({
     setPackageReferenceImage(file);
     setPackageReferencePreviewUrl(URL.createObjectURL(file));
   });
+  const singleReferenceUploadProps: UploadProps = {
+    accept: "image/png,image/jpeg,image/webp",
+    multiple: true,
+    maxCount: 6,
+    showUploadList: false,
+    beforeUpload(file) {
+      addSingleReferenceFiles([file]);
+      return false;
+    },
+  };
 
   function createLocalImageUploadProps(onFile: (file: File) => void): UploadProps {
     return {
@@ -784,6 +842,31 @@ function GeneratePage({
   function clearPackageReferenceImage() {
     setPackageReferenceImage(null);
     setPackageReferencePreviewUrl("");
+  }
+
+  function addSingleReferenceFiles(files: File[]) {
+    setSingleReferences((current) => {
+      const availableSlots = Math.max(0, 6 - current.length);
+      const nextFiles = files.slice(0, availableSlots).map((file) => ({
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        file,
+        previewUrl: URL.createObjectURL(file),
+      }));
+      if (files.length > availableSlots) {
+        message.warning("最多上传 6 张参考图。");
+      }
+      return [...current, ...nextFiles];
+    });
+  }
+
+  function removeSingleReference(id: string) {
+    setSingleReferences((current) => {
+      const target = current.find((item) => item.id === id);
+      if (target) {
+        URL.revokeObjectURL(target.previewUrl);
+      }
+      return current.filter((item) => item.id !== id);
+    });
   }
 
   async function loadGalleryPage(cursor: string | null = null, pageIndex = 0) {
@@ -838,6 +921,64 @@ function GeneratePage({
     setGalleryPageCursors([null]);
     setGalleryPageIndex(0);
     setGalleryLoaded(false);
+  }
+
+  async function runSingleImageGeneration() {
+    const prompt = singlePrompt.trim();
+    if (!prompt) {
+      message.error("请输入提示词");
+      return;
+    }
+    setSingleLoading(true);
+    setSingleError("");
+    try {
+      singlePreviews.forEach((preview) => URL.revokeObjectURL(preview.url));
+      setSinglePreviews([]);
+      setSingleJob(null);
+
+      const assets = await Promise.all(singleReferences.map((item) => uploadSingleImageReference(item.file, token)));
+      const queuedJob = await apiPost<SingleImageJobResponse>(
+        "/single-image-jobs",
+        {
+          prompt,
+          asset_version_ids: assets.map((assetItem) => assetItem.version_id),
+        },
+        { token },
+      );
+      setSingleJob(queuedJob);
+      const completedJob = await waitForSingleImageCompletion(queuedJob.id, token, setSingleJob);
+      setSingleJob(completedJob);
+      const previewImages = await createOutputPreviews(
+        completedJob.outputs,
+        (output) => apiDownload(outputOriginalDownloadPath(output), { token }),
+        (blob) => URL.createObjectURL(blob),
+        { preserveOrder: true },
+      );
+      setSinglePreviews(previewImages);
+      resetGalleryCache();
+      void loadAccount();
+      message.success("单图生成完成，已保存到图库");
+    } catch (error) {
+      const displayMessage = userFacingErrorMessage(error, "generation");
+      setSingleError(displayMessage);
+      message.error(displayMessage);
+    } finally {
+      setSingleLoading(false);
+    }
+  }
+
+  async function deleteOutputFromGallery(output: OutputResponse) {
+    if (output.source !== "single_image") {
+      return;
+    }
+    try {
+      await apiDelete(outputOriginalDownloadPath(output).replace("/download", ""), { token });
+      message.success("已删除单图记录");
+      resetGalleryCache();
+      await loadGalleryPage(galleryPageCursors[galleryPageIndex] ?? null, galleryPageIndex);
+    } catch (error) {
+      message.error(userFacingErrorMessage(error, "gallery"));
+    }
   }
 
   async function downloadOriginalOutput(output: OutputResponse) {
@@ -1071,6 +1212,13 @@ function GeneratePage({
             首页
           </Button>
           <Button
+            type={activeWorkbenchPage === "single" ? "primary" : "text"}
+            icon={<Sparkles size={15} />}
+            onClick={() => setActiveWorkbenchPage("single")}
+          >
+            单图
+          </Button>
+          <Button
             type={activeWorkbenchPage === "gallery" ? "primary" : "text"}
             icon={<Images size={15} />}
             onClick={openGallery}
@@ -1093,7 +1241,7 @@ function GeneratePage({
           />
           <Tag className="soft-tag">
             <UserRound size={13} />
-            {accountDisplayName(account, username, userEmail)}
+            {accountDisplayName(account, username, userPhone)}
           </Tag>
           <Button onClick={onLogout} icon={<LogOut size={16} />}>
             退出
@@ -1179,6 +1327,9 @@ function GeneratePage({
                 </Upload.Dragger>
               )}
             </Form.Item>
+            <Form.Item name="productLogoEnabled" label="商品 Logo 开关" valuePropName="checked">
+              <Switch checkedChildren="开启" unCheckedChildren="关闭" disabled={loading} />
+            </Form.Item>
 
             <Row gutter={12}>
               <Col span={12}>
@@ -1255,9 +1406,21 @@ function GeneratePage({
             </Row>
 
             <Row gutter={12}>
-              <Col span={24}>
+              <Col span={12}>
                 <Form.Item name="model" label="规格型号">
                   <Input />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item name="productVolume" label="商品体积" rules={[{ required: true, message: "请选择商品体积" }]}>
+                  <Radio.Group
+                    optionType="button"
+                    buttonStyle="solid"
+                    options={[
+                      { label: "小型商品", value: "small" },
+                      { label: "大型商品", value: "large" },
+                    ]}
+                  />
                 </Form.Item>
               </Col>
             </Row>
@@ -1431,6 +1594,135 @@ function GeneratePage({
         </section>
       </section>
       ) : null}
+      {activeWorkbenchPage === "single" ? (
+        <section className="single-image-page" aria-label="单图生成">
+          <section className="single-image-config app-panel">
+            <div className="section-heading compact">
+              <span className="icon-chip">
+                <Sparkles size={18} />
+              </span>
+              <div>
+                <Title level={3}>单图生成</Title>
+                <Paragraph>输入提示词，可选上传多张参考图。</Paragraph>
+              </div>
+            </div>
+            <Form layout="vertical" requiredMark={false}>
+              <Form.Item label="参考图片">
+                <Upload.Dragger {...singleReferenceUploadProps} disabled={singleLoading || singleReferences.length >= 6} className="desktop-uploader single-uploader">
+                  <UploadCloud size={24} />
+                  <Text strong>选择或拖入参考图</Text>
+                  <Paragraph>可选，最多 6 张；支持 PNG / JPEG / WebP。</Paragraph>
+                </Upload.Dragger>
+                {singleReferences.length > 0 ? (
+                  <div className="single-reference-grid">
+                    {singleReferences.map((item) => (
+                      <div className="upload-preview-card single-reference-card" key={item.id}>
+                        <Image
+                          src={item.previewUrl}
+                          alt="单图参考图预览"
+                          className="upload-preview-image"
+                          preview={{ mask: "放大预览" }}
+                        />
+                        <Button
+                          type="text"
+                          danger
+                          className="upload-delete-button"
+                          aria-label="删除单图参考图"
+                          icon={<Trash2 size={16} />}
+                          disabled={singleLoading}
+                          onClick={() => removeSingleReference(item.id)}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </Form.Item>
+              <Form.Item label="提示词" required>
+                <Input.TextArea
+                  value={singlePrompt}
+                  onChange={(event) => setSinglePrompt(event.target.value)}
+                  rows={7}
+                  maxLength={4000}
+                  showCount
+                  placeholder="描述你要生成的图片内容、画面风格、主体、背景和用途。"
+                  disabled={singleLoading}
+                />
+              </Form.Item>
+              <Button
+                type="primary"
+                block
+                size="large"
+                icon={<Play size={17} />}
+                loading={singleLoading}
+                onClick={() => void runSingleImageGeneration()}
+              >
+                生成单图（扣 2 点）
+              </Button>
+            </Form>
+          </section>
+
+          <section className="single-image-result app-panel">
+            <div className="section-heading compact split-heading">
+              <div className="heading-left">
+                <span className="icon-chip">
+                  <ImageIcon size={18} />
+                </span>
+                <div>
+                  <Title level={3}>生成结果</Title>
+                  <Paragraph>成功后自动保存到图库。</Paragraph>
+                </div>
+              </div>
+              <Tag className="soft-tag">成功扣 2 点</Tag>
+            </div>
+            {singleError ? (
+              <Alert className="error-banner" type="error" showIcon message="单图生成失败" description={singleError} />
+            ) : null}
+            {singleLoading ? (
+              <Alert
+                type="info"
+                showIcon
+                message="正在生成单图"
+                description={`任务状态：${singleJob?.status ?? "准备中"}，参考图 ${singleReferences.length} 张。`}
+              />
+            ) : null}
+            {singlePreviews.length === 0 ? (
+              <div className="single-empty-state">
+                <ImageIcon size={34} />
+                <Text type="secondary">还没有单图输出</Text>
+              </div>
+            ) : (
+              <List
+                grid={{ gutter: 14, xs: 1, sm: 1, lg: 2 }}
+                dataSource={singlePreviews}
+                renderItem={(item) => (
+                  <List.Item>
+                    <article className="output-card">
+                      <div className="output-card-top">
+                        <strong>{outputName[item.output_type] ?? item.output_type}</strong>
+                        <Tag color="green">{item.quality_status}</Tag>
+                      </div>
+                      <Image
+                        src={item.url}
+                        alt="单图生成结果"
+                        className="output-image"
+                        style={{ width: "100%", maxHeight: 420, objectFit: "contain" }}
+                      />
+                      <div className="output-card-bottom">
+                        <Text type="secondary">
+                          {item.width} x {item.height}
+                        </Text>
+                        <Button href={item.url} download="single.png" size="small" icon={<Download size={14} />}>
+                          下载
+                        </Button>
+                      </div>
+                    </article>
+                  </List.Item>
+                )}
+              />
+            )}
+          </section>
+        </section>
+      ) : null}
       {activeWorkbenchPage === "gallery" ? (
         <section className="gallery-page app-panel" aria-label="用户图库">
           <div className="section-heading compact split-heading">
@@ -1458,7 +1750,7 @@ function GeneratePage({
                 <List.Item>
                   <article className="output-card gallery-card">
                     <div className="output-card-top">
-                      <strong>{outputName[item.output_type] ?? item.output_type}</strong>
+                      <strong>{item.source === "single_image" ? "单图生成" : outputName[item.output_type] ?? item.output_type}</strong>
                       <Tag color="green">{item.quality_status}</Tag>
                     </div>
                     <GalleryPreviewImage item={item} token={token} />
@@ -1466,9 +1758,16 @@ function GeneratePage({
                       <Text type="secondary">
                         {item.width} x {item.height}
                       </Text>
-                      <Button onClick={() => void downloadOriginalOutput(item)} size="small" icon={<Download size={14} />}>
-                        下载
-                      </Button>
+                      <Space size={6}>
+                        <Button onClick={() => void downloadOriginalOutput(item)} size="small" icon={<Download size={14} />}>
+                          下载
+                        </Button>
+                        {item.source === "single_image" ? (
+                          <Button danger onClick={() => void deleteOutputFromGallery(item)} size="small" icon={<Trash2 size={14} />}>
+                            删除
+                          </Button>
+                        ) : null}
+                      </Space>
                     </div>
                   </article>
                 </List.Item>
@@ -1508,7 +1807,7 @@ function GeneratePage({
           <div className="account-summary-grid">
             <article className="account-summary-card">
               <Text type="secondary">登录账号</Text>
-              <strong>{account?.user.email ?? userEmail}</strong>
+              <strong>{account?.user.phone ?? userPhone}</strong>
               <span>{account?.user.username || account?.username || "未设置用户名"}</span>
             </article>
             <article className="account-summary-card balance-card">
@@ -1696,6 +1995,21 @@ async function uploadProductBoundAsset(
   );
 }
 
+async function uploadSingleImageReference(file: File, token: string): Promise<AssetResponse> {
+  const presign = await apiPost<UploadPresignResponse>(
+    "/uploads/presign",
+    {
+      asset_type: "single_image_reference",
+      filename: file.name,
+      content_type: file.type || "image/png",
+      size_bytes: file.size,
+    },
+    { token },
+  );
+  await apiPutRaw(presign.upload_url, file, presign.headers);
+  return await apiPost<AssetResponse>("/uploads/complete", { upload_token: presign.upload_token }, { token });
+}
+
 async function waitForGenerationCompletion(
   jobId: string,
   token: string,
@@ -1714,6 +2028,26 @@ async function waitForGenerationCompletion(
     }
   }
   throw new Error("GENERATION_TIMEOUT: Generation did not finish in time.");
+}
+
+async function waitForSingleImageCompletion(
+  jobId: string,
+  token: string,
+  onProgress: (job: SingleImageJobResponse) => void,
+): Promise<SingleImageJobResponse> {
+  const deadline = Date.now() + 20 * 60 * 1000;
+  while (Date.now() < deadline) {
+    await delay(1200);
+    const job = await apiGet<SingleImageJobResponse>(`/single-image-jobs/${jobId}`, { token });
+    onProgress(job);
+    if (job.status === "completed") {
+      return job;
+    }
+    if (job.status === "failed") {
+      throw new Error(`${job.error_code || "IMAGE_PROVIDER_FAILED"}: ${job.error_message || "Single image generation failed"}`);
+    }
+  }
+  throw new Error("GENERATION_TIMEOUT: Single image generation did not finish in time.");
 }
 
 function isGenerationTimeoutError(error: unknown): boolean {
@@ -1762,17 +2096,17 @@ function transactionName(type: string): string {
   return names[type] ?? type;
 }
 
-async function requestRegistrationCode(email: string): Promise<RegistrationCodeResponse> {
-  return await apiPost<RegistrationCodeResponse>("/auth/registration-code", { email });
+async function requestRegistrationCode(phone: string): Promise<RegistrationCodeResponse> {
+  return await apiPost<RegistrationCodeResponse>("/auth/registration-code", { phone });
 }
 
-async function requestPasswordResetCode(email: string): Promise<RegistrationCodeResponse> {
-  return await apiPost<RegistrationCodeResponse>("/auth/password-reset-code", { email });
+async function requestPasswordResetCode(phone: string): Promise<RegistrationCodeResponse> {
+  return await apiPost<RegistrationCodeResponse>("/auth/password-reset-code", { phone });
 }
 
-async function resetPassword(email: string, verificationCode: string, newPassword: string): Promise<void> {
-  await apiPost<{ email: string; status: string }>("/auth/reset-password", {
-    email,
+async function resetPassword(phone: string, verificationCode: string, newPassword: string): Promise<void> {
+  await apiPost<{ phone: string; status: string }>("/auth/reset-password", {
+    phone,
     verification_code: verificationCode,
     new_password: newPassword,
   });
@@ -1780,13 +2114,15 @@ async function resetPassword(email: string, verificationCode: string, newPasswor
 
 async function registerAccount(
   username: string,
-  email: string,
+  phone: string,
+  invitationCode: string,
   verificationCode: string,
   password: string,
 ): Promise<AuthResponse> {
   return await apiPost<AuthResponse>("/auth/register", {
     username,
-    email,
+    phone,
+    invitation_code: invitationCode,
     verification_code: verificationCode,
     password,
   });

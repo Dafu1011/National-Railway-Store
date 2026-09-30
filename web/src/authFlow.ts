@@ -1,8 +1,10 @@
 export type AuthUser = {
   id: string;
   email: string;
+  phone?: string;
   username?: string;
   email_verified?: boolean;
+  phone_verified?: boolean;
 };
 
 export type AuthResponse = {
@@ -11,7 +13,7 @@ export type AuthResponse = {
 };
 
 export type RegistrationCodeResponse = {
-  email: string;
+  phone: string;
   expires_in_seconds: number;
   debug_code?: string;
 };
@@ -29,6 +31,12 @@ export function authErrorMessage(error: unknown): string {
   if (message.includes("EMAIL_CODE_INVALID")) {
     return "验证码不正确或已过期，请重新获取后再提交";
   }
+  if (message.includes("PHONE_CODE_INVALID")) {
+    return "验证码不正确或已过期，请重新获取后再提交";
+  }
+  if (message.includes("INVITATION_CODE_INVALID")) {
+    return "邀请码不存在或未启用，请确认后再提交";
+  }
   if (message.includes("EMAIL_DOMAIN_UNSUPPORTED")) {
     return "邮箱域名暂不支持";
   }
@@ -38,14 +46,23 @@ export function authErrorMessage(error: unknown): string {
   if (message.includes("SMTP_NOT_CONFIGURED")) {
     return "邮件发送服务尚未配置，无法发送验证码";
   }
+  if (message.includes("SMS_NOT_CONFIGURED")) {
+    return "短信验证码服务尚未配置，无法发送验证码";
+  }
   if (message.includes("EMAIL_NOT_VERIFIED")) {
     return "账号还没有完成邮箱验证，请先完成验证";
+  }
+  if (message.includes("PHONE_NOT_VERIFIED")) {
+    return "账号还没有完成手机号验证，请先完成验证";
   }
   if (message.includes("EMAIL_ALREADY_REGISTERED")) {
     return "该邮箱已经注册，请直接登录";
   }
+  if (message.includes("PHONE_ALREADY_REGISTERED")) {
+    return "该手机号已经注册，请直接登录";
+  }
   if (message.includes("INVALID_CREDENTIALS")) {
-    return "邮箱或密码不正确";
+    return "手机号或密码不正确";
   }
   if (message.includes("PASSWORD_RESET_IN_PROGRESS")) {
     return "密码重置正在处理，请稍后再试";

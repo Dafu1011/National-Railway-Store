@@ -83,12 +83,26 @@ class AppStorage:
                     id TEXT PRIMARY KEY,
                     email TEXT NOT NULL UNIQUE,
                     email_normalized TEXT UNIQUE,
+                    phone TEXT UNIQUE,
+                    phone_normalized TEXT UNIQUE,
                     username TEXT NOT NULL DEFAULT '',
                     password_hash TEXT NOT NULL,
                     role TEXT NOT NULL DEFAULT 'user',
                     status TEXT NOT NULL DEFAULT 'pending_verification',
                     email_verified_at TEXT,
+                    phone_verified_at TEXT,
+                    invitation_code_id TEXT,
+                    invitation_code TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS invitation_codes (
+                    id TEXT PRIMARY KEY,
+                    code TEXT NOT NULL UNIQUE,
+                    is_enabled INTEGER NOT NULL DEFAULT 1,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -126,6 +140,17 @@ class AppStorage:
                 CREATE TABLE IF NOT EXISTS email_verification_codes (
                     id TEXT PRIMARY KEY,
                     email TEXT NOT NULL,
+                    code_hash TEXT NOT NULL,
+                    purpose TEXT NOT NULL DEFAULT 'register',
+                    expires_at TEXT NOT NULL,
+                    consumed_at TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS phone_verification_codes (
+                    id TEXT PRIMARY KEY,
+                    phone TEXT NOT NULL,
                     code_hash TEXT NOT NULL,
                     purpose TEXT NOT NULL DEFAULT 'register',
                     expires_at TEXT NOT NULL,
@@ -284,6 +309,47 @@ class AppStorage:
                     FOREIGN KEY (user_id) REFERENCES users(id)
                 );
 
+                CREATE TABLE IF NOT EXISTS single_image_jobs (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    provider_name TEXT NOT NULL,
+                    error_code TEXT,
+                    error_message TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS single_image_job_assets (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    asset_version_id TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (job_id) REFERENCES single_image_jobs(id),
+                    FOREIGN KEY (user_id) REFERENCES users(id),
+                    FOREIGN KEY (asset_version_id) REFERENCES asset_versions(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS single_image_outputs (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    output_type TEXT NOT NULL DEFAULT 'single',
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    format TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    quality_status TEXT NOT NULL,
+                    deleted_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id),
+                    FOREIGN KEY (job_id) REFERENCES single_image_jobs(id)
+                );
+
                 CREATE TABLE IF NOT EXISTS upload_sessions (
                     upload_token TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
@@ -358,11 +424,25 @@ class AppStorage:
             _ensure_column(connection, "generation_outputs", "source_asset_version_id", "TEXT")
             _ensure_column(connection, "sessions", "expires_at", "TEXT")
             _ensure_column(connection, "users", "email_normalized", "TEXT")
+            _ensure_column(connection, "users", "phone", "TEXT")
+            _ensure_column(connection, "users", "phone_normalized", "TEXT")
             _ensure_column(connection, "users", "username", "TEXT NOT NULL DEFAULT ''")
             _ensure_column(connection, "users", "status", "TEXT NOT NULL DEFAULT 'active'")
             _ensure_column(connection, "users", "email_verified_at", "TEXT")
+            _ensure_column(connection, "users", "phone_verified_at", "TEXT")
+            _ensure_column(connection, "users", "invitation_code_id", "TEXT")
+            _ensure_column(connection, "users", "invitation_code", "TEXT")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_email_verification_codes_lookup ON email_verification_codes(email, purpose, consumed_at, expires_at)"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_normalized ON users(phone_normalized) WHERE phone_normalized IS NOT NULL AND phone_normalized <> ''"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_phone_verification_codes_lookup ON phone_verification_codes(phone, purpose, consumed_at, expires_at)"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_invitation_codes_code ON invitation_codes(code)"
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_app_releases_lookup ON app_releases(platform, arch, channel, status)"
@@ -378,6 +458,12 @@ class AppStorage:
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_generation_outputs_gallery ON generation_outputs(user_id, quality_status, created_at DESC, id DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_single_image_jobs_queue ON single_image_jobs(status, created_at ASC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_single_image_outputs_gallery ON single_image_outputs(user_id, quality_status, created_at DESC, id DESC)"
             )
             connection.execute("UPDATE users SET email_normalized = lower(email) WHERE email_normalized IS NULL")
             connection.execute(

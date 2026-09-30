@@ -70,6 +70,17 @@ export async function apiDownload(path: string, options: RequestOptions = {}): P
   return await response.blob();
 }
 
+export async function apiDelete(path: string, options: RequestOptions = {}): Promise<void> {
+  const response = await fetch(`/api/v1${path}`, {
+    method: "DELETE",
+    credentials: "include",
+    headers: makeHeaders(options.token),
+  });
+  if (!response.ok) {
+    await throwApiError(response);
+  }
+}
+
 export async function apiPutRaw(uploadUrl: string, body: Blob, headers: HeadersInit = {}): Promise<void> {
   const response = await fetch(uploadUrl, {
     method: "PUT",
