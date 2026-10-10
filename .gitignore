@@ -49,3 +49,28 @@ web/inspect-2019
 web/run-2019
 web/inspect-2019
 web/inspect-2020
+
+
+# ===== 桌面应用打包产物（不要提交到 Git）=====
+web/desktop-prepackaged/
+
+# Electron / 通用二进制产物兜底
+*.exe
+*.dll
+*.pak
+*.bin
+*.dat
+*.node
+*.asar
+
+# ===== 常见构建/缓存产物 =====
+node_modules/
+dist/
+build/
+out/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.DS_Store

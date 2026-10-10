@@ -75,6 +75,35 @@ test("renderer server falls back to index for malformed URL escapes", async () =
   }
 });
 
+test("renderer server retries dynamically assigned ports that browsers block", async () => {
+  const { createRendererServer, isBlockedRendererPort } = require("./main.cjs");
+  const fixture = createRendererFixture();
+  const checkedPorts = [];
+  const server = await createRendererServer({
+    distDir: fixture.distDir,
+    isBlockedPort: (port) => {
+      checkedPorts.push(port);
+      return checkedPorts.length === 1 || isBlockedRendererPort(port);
+    },
+  });
+  try {
+    const response = await fetch(server.url);
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), "INDEX_OK");
+    assert.ok(checkedPorts.length >= 2);
+  } finally {
+    await server.close();
+    fs.rmSync(fixture.rootDir, { recursive: true, force: true });
+  }
+});
+
+test("isBlockedRendererPort marks ports rejected by Chromium and Fetch", () => {
+  const { isBlockedRendererPort } = require("./main.cjs");
+  assert.equal(isBlockedRendererPort(6667), true);
+  assert.equal(isBlockedRendererPort(10080), true);
+  assert.equal(isBlockedRendererPort(49152), false);
+});
+
 test("renderer server does not serve sibling files through encoded traversal", async () => {
   const { createRendererServer } = require("./main.cjs");
   const fixture = createRendererFixture();

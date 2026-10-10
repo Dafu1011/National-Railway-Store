@@ -11,7 +11,7 @@ OUTPUT_SPECS: tuple[tuple[str, int, int], ...] = (
     ("main", 800, 800),
     ("certificate", 800, 800),
     ("package", 800, 800),
-    ("detail", 800, 2400),
+    ("detail", 800, 3200),
     ("scene", 800, 800),
 )
 

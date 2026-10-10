@@ -26,7 +26,6 @@ import type { UploadProps } from "antd";
 import {
   AlertCircle,
   ArrowRight,
-  Barcode,
   CreditCard,
   Download,
   Gauge,
@@ -48,7 +47,12 @@ import {
 import { apiDelete, apiDownload, apiGet, apiPost, apiPutRaw } from "./api/client";
 import { barcodeValidationMessage, suggestedBarcodeValue, type BarcodeValidationResponse } from "./barcodeValidation";
 import { generationProgress, nextLiveGenerationProgress } from "./generationProgress";
-import { buildProjectCreatePayload } from "./generationPayload";
+import {
+  isRecoverableActiveGenerationError,
+  waitForGenerationCompletion as waitForRecoverableGenerationCompletion,
+  type ActiveGenerationJobsResponse,
+} from "./generationRecovery";
+import { buildProjectCreatePayload, DETAIL_SCENE_FIELDS, type DetailSceneValues } from "./generationPayload";
 import { accountDisplayName, transactionDetailText } from "./accountDisplay";
 import { buildProductCreatePayload, type ProductPayloadValues } from "./productPayload";
 import { generationErrorMessage } from "./generationErrors";
@@ -64,6 +68,7 @@ import {
 } from "./outputPreviews";
 import {
   authErrorMessage,
+  loginRequestBody,
   restoreAuthFromRefresh,
   type AuthResponse,
   type RegistrationCodeResponse,
@@ -115,6 +120,7 @@ type AssetResponse = {
 
 type GenerationResponse = {
   id: string;
+  project_id?: string;
   status: string;
   provider_name: string;
   error_code?: string | null;
@@ -177,6 +183,7 @@ type AccountTransactionsResponse = {
 };
 
 type LoginValues = {
+  loginAccount: string;
   username: string;
   phone: string;
   invitationCode: string;
@@ -185,19 +192,20 @@ type LoginValues = {
   newPassword: string;
 };
 
-type ProductFormValues = ProductPayloadValues & {
+type ProductFormValues = ProductPayloadValues & DetailSceneValues & {
   companyName: string;
   manufacturerName: string;
-  manufacturerAddress: string;
+  manufacturerAddress?: string;
   productionDate: string;
   inspector: string;
   barcodeType: "EAN_13" | "EAN_8" | "UPC_A" | "CODE_128";
   barcodeValue: string;
   productLogoEnabled: boolean;
-  productVolume: "large" | "small";
+  productVolume: "large" | "small" | "car";
 };
 
 const loginInitialValues: LoginValues = {
+  loginAccount: "",
   username: "",
   phone: "",
   invitationCode: "",
@@ -219,6 +227,10 @@ const productInitialValues: ProductFormValues = {
   barcodeValue: "",
   productLogoEnabled: false,
   productVolume: "small",
+  scene1: "",
+  scene2: "",
+  scene3: "",
+  scene4: "",
 };
 
 const outputName: Record<string, string> = {
@@ -233,6 +245,7 @@ const galleryPageLimit = 30;
 
 export function App() {
   usePointerGlow();
+  useClickRipple();
   const [token, setToken] = useState("");
   const [userPhone, setUserPhone] = useState("");
   const [username, setUsername] = useState("");
@@ -383,6 +396,74 @@ function usePointerGlow() {
   }, []);
 }
 
+function useClickRipple() {
+  useEffect(() => {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      return;
+    }
+
+    const clickableSelector = [
+      "button",
+      "a",
+      ".ant-btn",
+      ".ant-upload",
+      ".ant-segmented-item",
+      ".ant-radio-button-wrapper",
+      ".ant-switch",
+      ".output-card",
+      ".upload-preview-card",
+      ".metric-tile",
+      ".account-summary-card",
+      ".recharge-card",
+    ].join(",");
+
+    function pulse(event: PointerEvent) {
+      const target = event.target instanceof Element ? event.target.closest<HTMLElement>(clickableSelector) : null;
+      if (!target || target.hasAttribute("disabled") || target.getAttribute("aria-disabled") === "true") {
+        return;
+      }
+      const rect = target.getBoundingClientRect();
+      target.style.setProperty("--click-x", `${event.clientX - rect.left}px`);
+      target.style.setProperty("--click-y", `${event.clientY - rect.top}px`);
+      target.classList.remove("click-ripple-active");
+      void target.offsetWidth;
+      target.classList.add("click-ripple-active");
+      window.setTimeout(() => target.classList.remove("click-ripple-active"), 560);
+    }
+
+    document.addEventListener("pointerdown", pulse, { passive: true });
+    return () => document.removeEventListener("pointerdown", pulse);
+  }, []);
+}
+
+function GallerySkeletonGrid() {
+  return (
+    <div className="gallery-skeleton-grid" aria-label="图库加载中">
+      {Array.from({ length: 8 }, (_, index) => (
+        <article className="output-card gallery-card skeleton-card" key={index}>
+          <div className="output-card-top">
+            <span className="skeleton-line skeleton-line-short" />
+            <span className="skeleton-pill" />
+          </div>
+          <div className="output-image skeleton-image" />
+          <div className="output-card-bottom">
+            <span className="skeleton-line skeleton-line-tiny" />
+            <span className="skeleton-pill" />
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function PreviewSkeleton({ label }: { label: string }) {
+  return (
+    <div className="output-image preview-skeleton" aria-label={label}>
+      <span className="skeleton-line skeleton-line-short" />
+    </div>
+  );
+}
+
 function LoginPage({ onAuthenticated }: { onAuthenticated: (auth: AuthResponse) => void }) {
   const { message } = AntdApp.useApp();
   const [form] = Form.useForm<LoginValues>();
@@ -426,7 +507,7 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (auth: AuthResponse) 
         message.success("注册成功，已进入生成台");
         return;
       }
-      const auth = await apiPost<AuthResponse>("/auth/login", { phone: values.phone, password: values.password });
+      const auth = await apiPost<AuthResponse>("/auth/login", loginRequestBody(values.loginAccount, values.password));
       onAuthenticated(auth);
       message.success("登录成功");
     } catch (error) {
@@ -554,16 +635,26 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (auth: AuthResponse) 
                 <Input size="large" autoComplete="username" />
               </Form.Item>
             ) : null}
-            <Form.Item
-              name="phone"
-              label="手机号"
-              rules={[
-                { required: true, message: "请输入手机号" },
-                { pattern: /^\d{6,20}$/, message: "请输入正确的手机号" },
-              ]}
-            >
-              <Input size="large" inputMode="tel" autoComplete="tel" />
-            </Form.Item>
+            {authMode === "login" ? (
+              <Form.Item
+                name="loginAccount"
+                label="手机号或用户名"
+                rules={[{ required: true, whitespace: true, message: "请输入手机号或用户名" }]}
+              >
+                <Input size="large" autoComplete="username" />
+              </Form.Item>
+            ) : (
+              <Form.Item
+                name="phone"
+                label="手机号"
+                rules={[
+                  { required: true, message: "请输入手机号" },
+                  { pattern: /^\d{6,20}$/, message: "请输入正确的手机号" },
+                ]}
+              >
+                <Input size="large" inputMode="tel" autoComplete="tel" />
+              </Form.Item>
+            )}
             {authMode === "register" ? (
               <Form.Item name="invitationCode" label="邀请码" rules={[{ required: true, whitespace: true, message: "请输入邀请码" }]}>
                 <Input size="large" autoComplete="off" />
@@ -923,10 +1014,25 @@ function GeneratePage({
     setGalleryLoaded(false);
   }
 
+  async function showCompletedGeneration(generated: GenerationResponse, successMessage: string) {
+    setGeneration(generated);
+    void loadAccount();
+    setLiveProgress(generationProgress(generated.outputs.length));
+
+    const previewImages = await createOutputPreviews(
+      generated.outputs,
+      (output) => apiDownload(outputOriginalDownloadPath(output), { token }),
+      (blob) => URL.createObjectURL(blob),
+    );
+    setPreviews(previewImages);
+    resetGalleryCache();
+    message.success(successMessage);
+  }
+
   async function runSingleImageGeneration() {
     const prompt = singlePrompt.trim();
     if (!prompt) {
-      message.error("请输入提示词");
+      message.error("请输入诉求内容");
       return;
     }
     setSingleLoading(true);
@@ -1135,23 +1241,43 @@ function GeneratePage({
           }),
         );
       });
-      setGeneration(generated);
-      void loadAccount();
-      setLiveProgress(generationProgress(generated.outputs.length));
-
-      const previewImages = await createOutputPreviews(
-        generated.outputs,
-        (output) => apiDownload(`/outputs/${output.id}/download`, { token }),
-        (blob) => URL.createObjectURL(blob),
-      );
-      setPreviews(previewImages);
-      resetGalleryCache();
-      message.success("五图已生成，可预览和下载");
+      await showCompletedGeneration(generated, "五图已生成，可预览和下载");
     } catch (error) {
       const displayMessage = generationErrorMessage(error);
       const generationTimedOut = isGenerationTimeoutError(error);
       setLastError(displayMessage);
       let recoveredCount = 0;
+      if (isRecoverableActiveGenerationError(error)) {
+        try {
+          const activeJob = await findActiveGenerationJob(token, activeProject?.id, error);
+          if (activeJob) {
+            setLastError("");
+            setGeneration(activeJob);
+            setLiveProgress(
+              generationProgress({
+                outputCount: activeJob.outputs.length,
+                workflowPercent: Math.max(liveProgress, 64),
+                loading: true,
+              }),
+            );
+            message.warning("网络连接已恢复，已重新连接正在生成的任务。");
+            const generated = await waitForGenerationCompletion(activeJob.id, token, (job) => {
+              setGeneration(job);
+              setLiveProgress(
+                generationProgress({
+                  outputCount: job.outputs.length,
+                  workflowPercent: liveProgress,
+                  loading: true,
+                }),
+              );
+            });
+            await showCompletedGeneration(generated, "五图已生成，可预览和下载");
+            return;
+          }
+        } catch {
+          // Preserve the original generation error if active job recovery also fails.
+        }
+      }
       if (!generationTimedOut && activeProject) {
         setProject({ ...activeProject, status: "failed" });
       }
@@ -1161,7 +1287,7 @@ function GeneratePage({
           if (partialOutputs.items.length > 0) {
             const previewImages = await createOutputPreviews(
               partialOutputs.items,
-              (output) => apiDownload(`/outputs/${output.id}/download`, { token }),
+              (output) => apiDownload(outputOriginalDownloadPath(output), { token }),
               (blob) => URL.createObjectURL(blob),
             );
             setGeneration({
@@ -1203,7 +1329,7 @@ function GeneratePage({
             <span>V2.0 商品图生成台</span>
           </div>
         </div>
-        <nav className="topbar-nav" aria-label="工作台导航">
+        <nav className="topbar-nav" data-active-page={activeWorkbenchPage} aria-label="工作台导航">
           <Button
             type={activeWorkbenchPage === "home" ? "primary" : "text"}
             icon={<Home size={15} />}
@@ -1419,6 +1545,7 @@ function GeneratePage({
                     options={[
                       { label: "小型商品", value: "small" },
                       { label: "大型商品", value: "large" },
+                      { label: "车", value: "car" },
                     ]}
                   />
                 </Form.Item>
@@ -1450,7 +1577,7 @@ function GeneratePage({
                 </Form.Item>
               </Col>
               <Col span={14}>
-                <Form.Item name="manufacturerAddress" label="厂商地址" rules={[{ required: true, whitespace: true, message: "请输入厂商地址" }]}>
+                <Form.Item name="manufacturerAddress" label="厂商地址（选填）">
                   <Input />
                 </Form.Item>
               </Col>
@@ -1474,6 +1601,20 @@ function GeneratePage({
                   <Input />
                 </Form.Item>
               </Col>
+            </Row>
+
+            <Typography.Paragraph type="secondary">
+              请描述商品使用的场景及用途，例如：办公室会议室，用于远程视频会议。
+              已填写的场景将用于生成详情图，未填写的场景由系统自动补齐。
+            </Typography.Paragraph>
+            <Row gutter={12}>
+              {DETAIL_SCENE_FIELDS.map(({ name, label }) => (
+                <Col xs={24} sm={12} key={name}>
+                  <Form.Item name={name} label={label} style={{ marginBottom: 28 }} rules={[{ max: 500, message: "每个场景最多500字" }]}>
+                    <Input.TextArea placeholder="场景+用途" autoSize={{ minRows: 3, maxRows: 6 }} maxLength={500} showCount />
+                  </Form.Item>
+                </Col>
+              ))}
             </Row>
 
             <Button type="primary" htmlType="submit" loading={loading} block size="large" icon={<Play size={17} />}>
@@ -1501,9 +1642,6 @@ function GeneratePage({
                 AI-Native Workbench
               </Tag>
               <Title level={2}>商品图生成工作台</Title>
-              <Paragraph>
-                源图进入模型生成视觉内容；正式文字、合格证字段和条码由系统后置合成，保证下载前的质量门槛。
-              </Paragraph>
             </div>
             <div className="progress-orb" aria-label={`当前进度 ${progress}%`}>
               <Progress
@@ -1547,10 +1685,6 @@ function GeneratePage({
                   <Paragraph>生成后可直接预览并下载单张 PNG。</Paragraph>
                 </div>
               </div>
-              <Tag className="soft-tag">
-                <Barcode size={13} />
-                条码系统合成
-              </Tag>
             </div>
             {previews.length === 0 ? (
               <Alert
@@ -1603,7 +1737,7 @@ function GeneratePage({
               </span>
               <div>
                 <Title level={3}>单图生成</Title>
-                <Paragraph>输入提示词，可选上传多张参考图。</Paragraph>
+                <Paragraph>输入诉求内容，可选上传多张参考图。</Paragraph>
               </div>
             </div>
             <Form layout="vertical" requiredMark={false}>
@@ -1637,7 +1771,7 @@ function GeneratePage({
                   </div>
                 ) : null}
               </Form.Item>
-              <Form.Item label="提示词" required>
+              <Form.Item label="诉求内容" required>
                 <Input.TextArea
                   value={singlePrompt}
                   onChange={(event) => setSinglePrompt(event.target.value)}
@@ -1656,7 +1790,7 @@ function GeneratePage({
                 loading={singleLoading}
                 onClick={() => void runSingleImageGeneration()}
               >
-                生成单图（扣 2 点）
+                生成单图（扣 2 点积分）
               </Button>
             </Form>
           </section>
@@ -1672,7 +1806,7 @@ function GeneratePage({
                   <Paragraph>成功后自动保存到图库。</Paragraph>
                 </div>
               </div>
-              <Tag className="soft-tag">成功扣 2 点</Tag>
+              <Tag className="soft-tag">成功扣 2 点积分</Tag>
             </div>
             {singleError ? (
               <Alert className="error-banner" type="error" showIcon message="单图生成失败" description={singleError} />
@@ -1740,7 +1874,7 @@ function GeneratePage({
             </Tag>
           </div>
           {galleryLoading && galleryPreviews.length === 0 ? (
-            <Alert type="info" showIcon message="正在加载图库" description="正在读取当前账号下已经生成过的商品图。" />
+            <GallerySkeletonGrid />
           ) : galleryPreviews.length === 0 ? null : (
             <>
             <List
@@ -1829,7 +1963,7 @@ function GeneratePage({
                 推荐
               </Tag>
               <div className="recharge-card-copy">
-                <Text strong>3699元套餐</Text>
+                <Text strong>3899元套餐</Text>
                 <Title level={2}>
                   10,000 <span>积分</span>
                 </Title>
@@ -1928,24 +2062,14 @@ function GalleryPreviewImage({ item, token }: { item: OutputResponse; token: str
 
   if (failed) {
     return (
-      <div
-        className="output-image"
-        style={{ alignItems: "center", display: "flex", justifyContent: "center", minHeight: 180, width: "100%" }}
-      >
+      <div className="output-image preview-fallback">
         缩略图加载失败
       </div>
     );
   }
 
   if (!previewUrl) {
-    return (
-      <div
-        className="output-image"
-        style={{ alignItems: "center", display: "flex", justifyContent: "center", minHeight: 180, width: "100%" }}
-      >
-        缩略图加载中
-      </div>
-    );
+    return <PreviewSkeleton label="缩略图加载中" />;
   }
 
   return (
@@ -2015,19 +2139,30 @@ async function waitForGenerationCompletion(
   token: string,
   onProgress: (job: GenerationResponse) => void,
 ): Promise<GenerationResponse> {
-  const deadline = Date.now() + 20 * 60 * 1000;
-  while (Date.now() < deadline) {
-    await delay(1200);
-    const job = await apiGet<GenerationResponse>(`/generation-jobs/${jobId}`, { token });
-    onProgress(job);
-    if (job.status === "completed") {
-      return job;
-    }
-    if (job.status === "failed") {
-      throw new Error(`${job.error_code || "IMAGE_PROVIDER_FAILED"}: ${job.error_message || "Generation failed"}`);
-    }
+  return await waitForRecoverableGenerationCompletion<GenerationResponse>({
+    jobId,
+    fetchJob: (activeJobId) => apiGet<GenerationResponse>(`/generation-jobs/${activeJobId}`, { token }),
+    onProgress,
+  });
+}
+
+async function findActiveGenerationJob(
+  token: string,
+  projectId: string | undefined,
+  triggerError: unknown,
+): Promise<GenerationResponse | null> {
+  const activeJobs = await apiGet<ActiveGenerationJobsResponse<GenerationResponse>>("/generation-jobs/active", { token });
+  if (projectId && !isActiveJobLimitError(triggerError)) {
+    return activeJobs.items.find((job) => job.project_id === projectId) ?? null;
   }
-  throw new Error("GENERATION_TIMEOUT: Generation did not finish in time.");
+  return activeJobs.items[0] ?? null;
+}
+
+function isActiveJobLimitError(error: unknown): boolean {
+  if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
+    return error.code.includes("ACTIVE_JOB_LIMIT_REACHED");
+  }
+  return error instanceof Error && error.message.includes("ACTIVE_JOB_LIMIT_REACHED");
 }
 
 async function waitForSingleImageCompletion(

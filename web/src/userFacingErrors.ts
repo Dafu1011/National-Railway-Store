@@ -13,6 +13,23 @@ export function userFacingErrorMessage(error: unknown, context: ErrorDisplayCont
   const raw = errorRawMessage(error);
   const upperRaw = raw.toUpperCase();
   const upperCode = code.toUpperCase();
+  const sceneError = `${upperCode} ${upperRaw}`;
+
+  if (sceneError.includes("DETAIL_SCENE_INPUT_INVALID")) {
+    return "请检查场景内容，每项最多500字。";
+  }
+  if (sceneError.includes("DETAIL_BRAIN_REQUIRED")) {
+    return "场景规划服务未启用，暂时无法按指定场景生成，请联系管理员。";
+  }
+  if (sceneError.includes("DETAIL_SCENE_SOURCE_INVALID")) {
+    return "场景规划结果与输入不匹配，请重新生成。";
+  }
+  if (sceneError.includes("DETAIL_BRAIN_FAILED")) {
+    return "场景规划失败，请稍后重试；已填写的场景不会替换为默认场景。";
+  }
+  if (/DETAIL_(PLAN|MODULE|USAGE)_/.test(sceneError)) {
+    return "场景规划结果不完整或不符合要求，请重新生成。";
+  }
 
   if (upperCode.includes("DESKTOP_API_PROXY_FAILED") || /SOCKET HANG UP|ECONNRESET|ECONNREFUSED|ETIMEDOUT|FAILED TO FETCH/.test(upperRaw)) {
     return context === "update" ? "更新失败，请检查网络后重试。" : "网络连接不稳定，请检查网络后重试。";
@@ -44,6 +61,38 @@ export function userFacingErrorMessage(error: unknown, context: ErrorDisplayCont
   }
   if (upperCode.includes("AUTH_REQUIRED") || upperCode.includes("REFRESH_REQUIRED") || upperCode.includes("REFRESH_INVALID") || upperCode.includes("HTTP_401")) {
     return "登录状态已过期，请重新登录。";
+  }
+  if (upperCode.includes("INVALID_CREDENTIALS")) {
+    return "账号或密码错误，请重新输入。";
+  }
+  if (
+    upperCode.includes("PHONE_CODE_RATE_LIMITED") ||
+    upperCode.includes("REGISTER_RATE_LIMITED") ||
+    upperCode.includes("LOGIN_RATE_LIMITED") ||
+    upperCode.includes("HTTP_429")
+  ) {
+    return "请求频繁，请稍后再试。";
+  }
+  if (upperCode.includes("HTTP_422")) {
+    return "请检查必填项是否填写完整。";
+  }
+  if (upperCode.includes("BARCODE_NOT_CONFIRMED") || upperCode.includes("BARCODE_VALUE_INVALID")) {
+    return "请先填写并确认条形码。";
+  }
+  if (upperCode.includes("PRODUCT_ORIGINAL_ASSET_REQUIRED")) {
+    return "请先上传商品图片。";
+  }
+  if (upperCode.includes("PRODUCT_ID_REQUIRED")) {
+    return "请先选择商品。";
+  }
+  if (upperCode.includes("UPLOAD_FILE_EMPTY")) {
+    return "上传文件为空，请重新选择文件。";
+  }
+  if (upperCode.includes("UPLOAD_FILE_TOO_LARGE") || upperCode.includes("UPLOAD_IMAGE_PIXELS_TOO_LARGE")) {
+    return "上传图片过大，请压缩后重试。";
+  }
+  if (upperCode.includes("UPLOAD_MIME_NOT_ALLOWED") || upperCode.includes("UPLOAD_IMAGE_DECODE_FAILED")) {
+    return "图片格式不支持，请上传 PNG、JPEG 或 WebP 图片。";
   }
 
   if (upperCode.includes("IMAGE_PROVIDER_FAILED") || upperRaw.includes("IMAGE_PROVIDER_FAILED")) {

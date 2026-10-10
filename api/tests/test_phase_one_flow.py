@@ -4,16 +4,129 @@ import time
 from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
 from app.api import phase_one
 from app.main import create_app
-from app.providers.real_image import GeneratedImage
+from app.providers.real_image import GeneratedImage, KeleFiveImagePipeline
 
 
 class PhaseOneFlowTests(unittest.TestCase):
+    def test_custom_scenes_require_brain_before_queueing_or_reserving_points(self):
+        image_provider = Mock()
+        pipeline = KeleFiveImagePipeline(image_provider)
+        with patch.object(phase_one, "build_image_generation_provider", return_value=pipeline), patch.object(phase_one, "notify_generation_queue"):
+            with TemporaryDirectory() as data_dir:
+                app = create_app(data_dir=data_dir)
+                with TestClient(app) as client:
+                    headers = {"Authorization": f"Bearer {verified_token(client, 'scene-required@example.com')}"}
+                    product = client.post("/api/v1/products", headers=headers, json={"name": "会议摄像头"}).json()
+                    upload_product_original(client, headers, product["id"])
+                    project = client.post("/api/v1/projects", headers=headers, json={
+                        "product_id": product["id"], "name": "无场景服务", "detail_config": {"scene_inputs": {"scene_3": "会议室，用于远程会议"}},
+                        "barcode": {"barcode_type": "EAN_13", "raw_value": "4006381333931", "confirmed": True},
+                    }).json()
+                    # No balance is granted: scene configuration must be checked before reserving points.
+                    response = client.post(f"/api/v1/projects/{project['id']}/generate", headers=headers)
+                    self.assertEqual(response.status_code, 503)
+                    self.assertEqual(response.json()["detail"]["code"], "DETAIL_BRAIN_REQUIRED")
+                    with app.state.storage.connect() as connection:
+                        self.assertEqual(connection.execute("SELECT COUNT(*) FROM generation_jobs").fetchone()[0], 0)
+        image_provider.edit_image.assert_not_called()
+
+    def test_scene_inputs_are_normalized_persisted_and_owned_by_the_project_user(self):
+        with TemporaryDirectory() as data_dir:
+            app = create_app(data_dir=data_dir)
+            with TestClient(app) as client:
+                headers = {"Authorization": f"Bearer {verified_token(client, 'scene-owner@example.com')}"}
+                other_headers = {"Authorization": f"Bearer {verified_token(client, 'scene-other@example.com')}"}
+                product = client.post("/api/v1/products", headers=headers, json={"name": "会议摄像头"}).json()
+                body = {
+                    "product_id": product["id"], "name": "指定场景",
+                    "detail_config": {"scene_inputs": {"scene_1": " \n", "scene_3": "  会议室，用于远程会议  "}, "selling_points": ["清晰"]},
+                    "barcode": {"barcode_type": "EAN_13", "raw_value": "4006381333931", "confirmed": True},
+                }
+                response = client.post("/api/v1/projects", headers=headers, json=body)
+                self.assertEqual(response.status_code, 201)
+                expected = {"scene_inputs": {"scene_3": "会议室，用于远程会议"}, "selling_points": ["清晰"]}
+                self.assertEqual(response.json()["detail_config"], expected)
+                saved = phase_one.get_project_payload(app.state.storage, response.json()["id"], product["user_id"])
+                self.assertEqual(saved["detail_config"], expected)
+                other_projects = client.get("/api/v1/projects", headers=other_headers).json()["items"]
+                self.assertNotIn(response.json()["id"], [item["id"] for item in other_projects])
+                denied = client.post("/api/v1/projects", headers=other_headers, json=body)
+                self.assertIn(denied.status_code, {403, 404})
+
+    def test_project_api_rejects_invalid_scene_input_shapes_and_lengths(self):
+        with TemporaryDirectory() as data_dir:
+            app = create_app(data_dir=data_dir)
+            with TestClient(app) as client:
+                headers = {"Authorization": f"Bearer {verified_token(client, 'scene-validation@example.com')}"}
+                product = client.post("/api/v1/products", headers=headers, json={"name": "会议摄像头"}).json()
+                for inputs in ([], None, {"scene_5": "多余场景"}, {"scene_1": 123}, {"scene_1": None}, {"scene_1": "字" * 501}):
+                    with self.subTest(inputs=inputs):
+                        response = client.post("/api/v1/projects", headers=headers, json={
+                            "product_id": product["id"], "name": "场景校验", "detail_config": {"scene_inputs": inputs},
+                            "barcode": {"barcode_type": "EAN_13", "raw_value": "4006381333931", "confirmed": True},
+                        })
+                        self.assertEqual(response.status_code, 422)
+                        self.assertEqual(response.json()["detail"]["code"], "DETAIL_SCENE_INPUT_INVALID")
+
+    def test_scene_inputs_reach_the_queued_generation_provider(self):
+        captured = []
+
+        class CapturingProvider:
+            name = "scene-capture"
+
+            def generate_five_images(self, **kwargs):
+                captured.append(kwargs["project"]["detail_config"]["scene_inputs"])
+                raise RuntimeError("test stops before external generation")
+
+        with patch.object(phase_one, "build_image_generation_provider", return_value=CapturingProvider()):
+            with TemporaryDirectory() as data_dir:
+                app = create_app(data_dir=data_dir)
+                with TestClient(app) as client:
+                    headers = {"Authorization": f"Bearer {verified_token(client, 'scene-queue@example.com')}"}
+                    product = client.post("/api/v1/products", headers=headers, json={"name": "会议摄像头"}).json()
+                    upload_product_original(client, headers, product["id"])
+                    grant_test_points(app, product_id=product["id"])
+                    project = client.post("/api/v1/projects", headers=headers, json={
+                        "product_id": product["id"], "name": "队列场景", "detail_config": {"scene_inputs": {"scene_3": "  会议室，用于远程会议  "}},
+                        "barcode": {"barcode_type": "EAN_13", "raw_value": "4006381333931", "confirmed": True},
+                    }).json()
+                    queued = client.post(f"/api/v1/projects/{project['id']}/generate", headers=headers)
+                    self.assertEqual(queued.status_code, 202)
+                    wait_for_generation_status(client, headers, queued.json()["id"], {"failed"})
+        self.assertEqual(captured, [{"scene_3": "会议室，用于远程会议"}])
+
+    def setUp(self):
+        self._original_sms_env = {
+            "APP_ENV": os.environ.get("APP_ENV"),
+            "SMS_PROVIDER": os.environ.get("SMS_PROVIDER"),
+            "SMS_ACCESS_KEY_ID": os.environ.get("SMS_ACCESS_KEY_ID"),
+            "SMS_ACCESS_KEY_SECRET": os.environ.get("SMS_ACCESS_KEY_SECRET"),
+            "SMS_SIGN_NAME": os.environ.get("SMS_SIGN_NAME"),
+            "SMS_TEMPLATE_CODE": os.environ.get("SMS_TEMPLATE_CODE"),
+            "SMS_TENCENT_SECRET_ID": os.environ.get("SMS_TENCENT_SECRET_ID"),
+            "SMS_TENCENT_SECRET_KEY": os.environ.get("SMS_TENCENT_SECRET_KEY"),
+            "SMS_TENCENT_SDK_APP_ID": os.environ.get("SMS_TENCENT_SDK_APP_ID"),
+            "SMS_DEBUG_SKIP_SEND": os.environ.get("SMS_DEBUG_SKIP_SEND"),
+        }
+        os.environ["APP_ENV"] = "test"
+        for key in self._original_sms_env:
+            if key != "APP_ENV":
+                os.environ.pop(key, None)
+
+    def tearDown(self):
+        for key, value in self._original_sms_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
     def test_phone_registration_requires_sms_code_and_enabled_invitation_code(self):
         with TemporaryDirectory() as data_dir:
             app = create_app(data_dir=data_dir)
@@ -100,6 +213,14 @@ class PhaseOneFlowTests(unittest.TestCase):
                 )
                 self.assertEqual(login_response.status_code, 200)
                 self.assertIn("access_token", login_response.json())
+
+                username_login_response = client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "验证用户", "password": "StrongPass123"},
+                )
+                self.assertEqual(username_login_response.status_code, 200)
+                self.assertIn("access_token", username_login_response.json())
+
                 refresh_cookie = login_response.cookies.get("zhifeng_refresh_token")
                 self.assertIsNotNone(refresh_cookie)
                 set_cookie = login_response.headers.get("set-cookie", "")
@@ -121,6 +242,161 @@ class PhaseOneFlowTests(unittest.TestCase):
                     json={"phone": "123"},
                 )
                 self.assertEqual(invalid_phone.status_code, 422)
+
+    def test_username_registration_rejects_duplicate_username_for_login_identity(self):
+        with TemporaryDirectory() as data_dir:
+            app = create_app(data_dir=data_dir)
+            with app.state.storage.connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO users
+                        (id, email, email_normalized, phone, phone_normalized, username, password_hash,
+                         status, email_verified_at, phone_verified_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        "existing-user",
+                        "existing@qq.com",
+                        "existing@qq.com",
+                        "13900139000",
+                        "13900139000",
+                        "duplicate",
+                        phase_one.hash_password("StrongPass123"),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO invitation_codes (id, code, is_enabled, use_count) VALUES ('invite-dup', 'DUP2026', 1, 0)"
+                )
+                connection.execute(
+                    """
+                    INSERT INTO phone_verification_codes (id, phone, code_hash, purpose, expires_at)
+                    VALUES (?, ?, ?, 'register', ?)
+                    """,
+                    (
+                        "dup-code",
+                        "13800138001",
+                        phase_one.hash_registration_code("13800138001", "123456"),
+                        phase_one.utc_after(minutes=10),
+                    ),
+                )
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/v1/auth/register",
+                    json={
+                        "username": "Duplicate",
+                        "phone": "13800138001",
+                        "invitation_code": "DUP2026",
+                        "verification_code": "123456",
+                        "password": "StrongPass123",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["code"], "USERNAME_ALREADY_REGISTERED")
+
+    def test_login_allows_unverified_phone_when_password_is_valid(self):
+        with TemporaryDirectory() as data_dir:
+            app = create_app(data_dir=data_dir)
+            with app.state.storage.connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO users
+                        (id, email, email_normalized, phone, phone_normalized, username, password_hash,
+                         status, email_verified_at, phone_verified_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP, NULL)
+                    """,
+                    (
+                        "unverified-phone-user",
+                        "unverified@qq.com",
+                        "unverified@qq.com",
+                        "13800138002",
+                        "13800138002",
+                        "unverified",
+                        phase_one.hash_password("StrongPass123"),
+                    ),
+                )
+            with TestClient(app) as client:
+                phone_login = client.post(
+                    "/api/v1/auth/login",
+                    json={"phone": "13800138002", "password": "StrongPass123"},
+                )
+                username_login = client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "unverified", "password": "StrongPass123"},
+                )
+
+        self.assertEqual(phone_login.status_code, 200)
+        self.assertIn("access_token", phone_login.json())
+        self.assertEqual(username_login.status_code, 200)
+        self.assertIn("access_token", username_login.json())
+
+    def test_registration_code_reports_sms_provider_failures_separately_from_missing_config(self):
+        original_sender = phase_one.send_registration_code_sms
+
+        def fail_provider(*args, **kwargs):
+            raise phase_one.SmsNotConfigured("SMS_TENCENT_FAILED:AuthFailure.SignatureFailure:signature invalid")
+
+        phase_one.send_registration_code_sms = fail_provider
+        try:
+            with TemporaryDirectory() as data_dir:
+                app = create_app(data_dir=data_dir)
+                with TestClient(app) as client:
+                    response = client.post("/api/v1/auth/registration-code", json={"phone": "13800138000"})
+
+            self.assertEqual(response.status_code, 502)
+            self.assertEqual(response.json()["detail"]["code"], "SMS_PROVIDER_FAILED")
+            self.assertIn("AuthFailure.SignatureFailure", response.json()["detail"]["message"])
+        finally:
+            phase_one.send_registration_code_sms = original_sender
+
+    def test_phone_code_rate_limit_window_is_three_minutes(self):
+        class CapturingRuntimeServices:
+            def __init__(self):
+                self.captured: list[tuple[str, int, int]] = []
+
+            def hit_rate_limit(self, key: str, *, limit: int, window_seconds: int) -> bool:
+                self.captured.append((key, limit, window_seconds))
+                return True
+
+        with TemporaryDirectory() as data_dir:
+            app = create_app(data_dir=data_dir)
+            services = CapturingRuntimeServices()
+            app.state.runtime_services = services
+            with TestClient(app) as client:
+                response = client.post("/api/v1/auth/registration-code", json={"phone": "13800138000"})
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.json()["detail"]["code"], "PHONE_CODE_RATE_LIMITED")
+        self.assertEqual(services.captured[0][1:], (5, 180))
+
+    def test_register_submit_rate_limit_window_is_three_minutes(self):
+        class CapturingRuntimeServices:
+            def __init__(self):
+                self.captured: list[tuple[str, int, int]] = []
+
+            def hit_rate_limit(self, key: str, *, limit: int, window_seconds: int) -> bool:
+                self.captured.append((key, limit, window_seconds))
+                return True
+
+        with TemporaryDirectory() as data_dir:
+            app = create_app(data_dir=data_dir)
+            services = CapturingRuntimeServices()
+            app.state.runtime_services = services
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/v1/auth/register",
+                    json={
+                        "username": "限流用户",
+                        "phone": "13800138000",
+                        "invitation_code": "VIP2026",
+                        "verification_code": "123456",
+                        "password": "StrongPass123",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.json()["detail"]["code"], "REGISTER_RATE_LIMITED")
+        self.assertEqual(services.captured[0][1:], (5, 180))
 
     def test_password_login_refresh_session_defaults_to_seven_days(self):
         original = os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS")
@@ -354,6 +630,7 @@ class PhaseOneFlowTests(unittest.TestCase):
 
     def test_generation_passes_optional_certificate_and_package_reference_assets_to_provider(self):
         captured_kwargs: list[dict[str, object]] = []
+        submitted_job_id = ""
 
         class CapturingProvider:
             name = "capturing-provider"
@@ -402,6 +679,7 @@ class PhaseOneFlowTests(unittest.TestCase):
 
                     response = client.post(f"/api/v1/projects/{project['id']}/generate", headers=headers)
                     self.assertEqual(response.status_code, 202)
+                    submitted_job_id = response.json()["id"]
                     wait_for_generation_status(client, headers, response.json()["id"], {"completed"})
 
         finally:
@@ -412,6 +690,9 @@ class PhaseOneFlowTests(unittest.TestCase):
         self.assertEqual(set(reference_image_paths), {"certificate", "package"})
         self.assertTrue(str(reference_image_paths["certificate"]).endswith(f"{certificate_reference['version_id']}.png"))
         self.assertTrue(str(reference_image_paths["package"]).endswith(f"{package_reference['version_id']}.png"))
+        output_folder = str(captured_kwargs[0]["job_id"])
+        self.assertNotEqual(output_folder, submitted_job_id)
+        self.assertRegex(output_folder, rf"^reference-assets_\d{{8}}_\d{{6}}_{submitted_job_id.replace('-', '')[:8]}$")
 
     def test_phase_one_user_can_generate_and_download_five_images(self):
         with TemporaryDirectory() as data_dir:
@@ -474,7 +755,7 @@ class PhaseOneFlowTests(unittest.TestCase):
                     "main": (800, 800),
                     "certificate": (800, 800),
                     "package": (800, 800),
-                    "detail": (800, 2400),
+                    "detail": (800, 3200),
                     "scene": (800, 800),
                 }
                 output_types = {output["output_type"] for output in generation["outputs"]}
@@ -997,6 +1278,66 @@ class PhaseOneFlowTests(unittest.TestCase):
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+    def test_active_generation_jobs_returns_only_current_users_running_jobs(self):
+        with TemporaryDirectory() as data_dir:
+            app = create_app(data_dir=data_dir)
+            with TestClient(app) as client:
+                alice_token = verified_token(client, "active-alice@example.com")
+                bob_token = verified_token(client, "active-bob@example.com")
+                alice_headers = {"Authorization": f"Bearer {alice_token}"}
+                bob_headers = {"Authorization": f"Bearer {bob_token}"}
+                alice_product = client.post(
+                    "/api/v1/products",
+                    headers=alice_headers,
+                    json={"name": "Alice Active Cup", "brand": "Zhifeng", "model": "AA1"},
+                ).json()
+                bob_product = client.post(
+                    "/api/v1/products",
+                    headers=bob_headers,
+                    json={"name": "Bob Active Cup", "brand": "Zhifeng", "model": "BA1"},
+                ).json()
+                alice_project = client.post(
+                    "/api/v1/projects",
+                    headers=alice_headers,
+                    json={
+                        "product_id": alice_product["id"],
+                        "name": "Alice Active Project",
+                        "barcode": {"barcode_type": "EAN_13", "raw_value": "4006381333931", "confirmed": True},
+                    },
+                ).json()
+                bob_project = client.post(
+                    "/api/v1/projects",
+                    headers=bob_headers,
+                    json={
+                        "product_id": bob_product["id"],
+                        "name": "Bob Active Project",
+                        "barcode": {"barcode_type": "EAN_13", "raw_value": "4006381333931", "confirmed": True},
+                    },
+                ).json()
+                with app.state.storage.connect() as connection:
+                    connection.execute(
+                        """
+                        INSERT INTO generation_jobs (id, user_id, project_id, status, provider_name)
+                        VALUES (?, ?, ?, 'running', 'mock-image')
+                        """,
+                        ("alice-running-job", alice_product["user_id"], alice_project["id"]),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO generation_jobs (id, user_id, project_id, status, provider_name)
+                        VALUES (?, ?, ?, 'queued', 'mock-image')
+                        """,
+                        ("bob-queued-job", bob_product["user_id"], bob_project["id"]),
+                    )
+
+                response = client.get("/api/v1/generation-jobs/active", headers=alice_headers)
+
+                self.assertEqual(response.status_code, 200, response.text)
+                payload = response.json()
+                self.assertEqual([item["id"] for item in payload["items"]], ["alice-running-job"])
+                self.assertEqual(payload["items"][0]["status"], "running")
+                self.assertEqual(payload["items"][0]["outputs"], [])
 
     def test_generation_rejects_when_provider_slot_is_full(self):
         original_env = {

@@ -3,6 +3,15 @@ import { generationErrorMessage } from "./generationErrors";
 import { userFacingErrorMessage } from "./userFacingErrors";
 
 describe("generation error UX", () => {
+  it.each([
+    ["DETAIL_BRAIN_REQUIRED", "场景规划服务未启用，暂时无法按指定场景生成，请联系管理员。"],
+    ["DETAIL_BRAIN_FAILED", "场景规划失败，请稍后重试；已填写的场景不会替换为默认场景。"],
+    ["DETAIL_SCENE_SOURCE_INVALID", "场景规划结果与输入不匹配，请重新生成。"],
+    ["DETAIL_SCENE_INPUT_INVALID", "请检查场景内容，每项最多500字。"],
+  ])("explains scene errors even inside a provider failure (%s)", (code, expected) => {
+    expect(generationErrorMessage(new Error(`IMAGE_PROVIDER_FAILED: PARTIAL_IMAGE_GENERATION_FAILED: detail: ${code}`))).toBe(expected);
+  });
+
   it("hides Kele provider technical payloads from users", () => {
     const error = new Error(
       'IMAGE_PROVIDER_FAILED: KELE_HTTP_429: {"error":{"message":"当前分组上游负载已饱和，请稍后再试 (request id: req-123)","type":"new_api_error","code":"model_not_found"}}',
@@ -58,5 +67,16 @@ describe("generation error UX", () => {
 
     expect(message).toBe("更新失败，请稍后重试。");
     expect(message).not.toContain("HTTP_500");
+  });
+
+  it("maps validation and required-field backend errors to readable Chinese", () => {
+    expect(userFacingErrorMessage(new Error("HTTP_422: validation failed"), "generation")).toBe("请检查必填项是否填写完整。");
+    expect(userFacingErrorMessage(new Error("BARCODE_NOT_CONFIRMED: missing barcode"), "generation")).toBe("请先填写并确认条形码。");
+    expect(userFacingErrorMessage(new Error("PRODUCT_ORIGINAL_ASSET_REQUIRED: missing image"), "generation")).toBe("请先上传商品图片。");
+  });
+
+  it("maps common account errors to readable Chinese", () => {
+    expect(userFacingErrorMessage(new Error("INVALID_CREDENTIALS: bad password"), "auth")).toBe("账号或密码错误，请重新输入。");
+    expect(userFacingErrorMessage(new Error("PHONE_CODE_RATE_LIMITED: too often"), "auth")).toBe("请求频繁，请稍后再试。");
   });
 });

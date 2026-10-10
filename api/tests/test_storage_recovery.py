@@ -1,10 +1,28 @@
 import unittest
 from tempfile import TemporaryDirectory
 
-from app.storage import AppStorage
+from app.storage import AppStorage, output_folder_name
 
 
 class StorageRecoveryTests(unittest.TestCase):
+    def test_output_folder_name_uses_safe_username_beijing_time_and_job_suffix(self):
+        folder_name = output_folder_name(
+            username='张/三: "A*B"?',
+            job_id="12345678-90ab-cdef-1234-567890abcdef",
+            created_at="2026-10-09T07:30:45+00:00",
+        )
+
+        self.assertEqual(folder_name, "张_三_A_B_20261009_153045_12345678")
+
+    def test_output_folder_name_falls_back_to_user_when_username_has_no_safe_characters(self):
+        folder_name = output_folder_name(
+            username=' /\\:*?"<>| ',
+            job_id="abcdef12-90ab-cdef-1234-567890abcdef",
+            created_at="2026-10-09 23:59:59",
+        )
+
+        self.assertEqual(folder_name, "user_20261010_075959_abcdef12")
+
     def test_create_marks_interrupted_generation_jobs_failed(self):
         with TemporaryDirectory() as data_dir:
             storage = AppStorage.create(data_dir)

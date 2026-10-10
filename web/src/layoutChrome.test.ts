@@ -61,7 +61,8 @@ describe("layout chrome", () => {
   it("adds an account page for balance and customer-service recharge", () => {
     expect(appSource).toContain('apiGet<AccountResponse>("/account/me"');
     expect(appSource).toContain('apiGet<AccountTransactionsResponse>("/account/transactions"');
-    expect(appSource).toContain("3699");
+    expect(appSource).toContain("3899元套餐");
+    expect(appSource).not.toContain("3699元套餐");
     expect(appSource).toContain("wechat-service-qr.jpg");
     expect(css).toContain(".account-page");
     expect(css).toContain(".recharge-card");
@@ -99,5 +100,9 @@ describe("layout chrome", () => {
     expect(appSource).not.toContain('label="材质"');
     expect(appSource).not.toContain('label="颜色"');
     expect(appSource).not.toContain('label="详情文案"');
+  });
+
+  it("adds vehicle as a product volume option", () => {
+    expect(appSource).toContain('{ label: "车", value: "car" }');
   });
 });

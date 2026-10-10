@@ -10,6 +10,8 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
+from app.providers.detail_brain import DetailBrainProvider
+from app.providers.detail_scenes import normalize_scene_inputs
 from app.rendering.barcode.images import render_barcode_image
 from app.rendering.barcode.validators import BarcodeType
 from app.providers.kele import KeleGptImage2Provider
@@ -20,7 +22,7 @@ OUTPUT_SPECS: tuple[tuple[str, int, int], ...] = (
     ("main", 800, 800),
     ("certificate", 800, 800),
     ("package", 800, 800),
-    ("detail", 800, 2400),
+    ("detail", 800, 3200),
     ("scene", 800, 800),
 )
 DEFAULT_EDIT_SIZE = "1024x1024"
@@ -37,10 +39,17 @@ class GeneratedImage:
 class KeleFiveImagePipeline:
     name = "kele-gpt-image-2"
 
-    def __init__(self, provider: KeleGptImage2Provider, font_path: str = "", edit_size: str = DEFAULT_EDIT_SIZE):
+    def __init__(
+        self,
+        provider: KeleGptImage2Provider,
+        font_path: str = "",
+        edit_size: str = DEFAULT_EDIT_SIZE,
+        detail_brain: DetailBrainProvider | None = None,
+    ):
         self.provider = provider
         self.font_path = font_path
         self.edit_size = edit_size.strip() or DEFAULT_EDIT_SIZE
+        self.detail_brain = detail_brain
 
     def generate_five_images(
         self,
@@ -52,6 +61,7 @@ class KeleFiveImagePipeline:
         source_image_path: Path,
         reference_image_paths: dict[str, Path] | None = None,
     ) -> list[GeneratedImage]:
+        self.validate_detail_scene_configuration(project)
         job_dir = output_dir / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
         generated: list[GeneratedImage] = []
@@ -63,7 +73,11 @@ class KeleFiveImagePipeline:
             try:
                 if output_type == "detail":
                     module_images: list[Image.Image] = []
-                    for prompt in _detail_module_prompts(product):
+                    for prompt in self._detail_module_prompts(
+                        product=product,
+                        project=project,
+                        source_image_path=product_reference_image_path,
+                    ):
                         raw = self.provider.edit_image(
                             prompt=prompt,
                             size=self.edit_size,
@@ -79,7 +93,9 @@ class KeleFiveImagePipeline:
                 image_paths = [product_reference_image_path]
                 if output_type == "main" and reference_image_paths.get("logo"):
                     image_paths.append(reference_image_paths["logo"])
-                if output_type in {"certificate", "package"} and reference_image_paths.get(output_type):
+                if output_type in {"certificate", "package"} and reference_image_paths.get(output_type) and not (
+                    output_type == "package" and _is_car_product_volume(project)
+                ):
                     image_paths.append(reference_image_paths[output_type])
                 prompt = _prompt_for(
                     output_type,
@@ -120,6 +136,27 @@ class KeleFiveImagePipeline:
             raise RuntimeError(f"PARTIAL_IMAGE_GENERATION_FAILED: {'; '.join(failures)}")
         return generated
 
+    def validate_detail_scene_configuration(self, project: dict[str, Any]) -> None:
+        scene_inputs = normalize_scene_inputs(project.get("detail_config", {}).get("scene_inputs", {}))
+        if scene_inputs and self.detail_brain is None:
+            raise RuntimeError("DETAIL_BRAIN_REQUIRED: custom scenes require the detail planning service")
+
+    def _detail_module_prompts(
+        self,
+        *,
+        product: dict[str, Any],
+        project: dict[str, Any],
+        source_image_path: Path,
+    ) -> list[str]:
+        self.validate_detail_scene_configuration(project)
+        if self.detail_brain is None:
+            return _detail_module_prompts(product)
+        return self.detail_brain.build_detail_prompts(
+            product=product,
+            project=project,
+            source_image_path=source_image_path,
+        )
+
 
 def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, Any] | None = None) -> str:
     name = product.get("name", "the uploaded product")
@@ -132,7 +169,11 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
         or package_config.get("company_name")
         or _company_name(product, certificate_config)
     )
-    package_address = package_config.get("manufacturer_address") or package_config.get("address") or ""
+    package_address = _clean_text(package_config.get("manufacturer_address") or package_config.get("address") or "")
+    missing_address_instruction = (
+        "No manufacturer address was entered. Omit its field label, value, row, and cell even in reference templates; "
+        "compact remaining rows with normal spacing, no blank rows or placeholders. "
+    )
     package_rows = _package_information_rows(product, package_manufacturer, package_address)
     package_brand = _clean_text(product.get("brand", ""))
     package_brand_wordmark = (
@@ -150,7 +191,6 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
         ("specification model", product.get("model", "")),
         ("manufacturer", package_manufacturer),
         ("address", package_address),
-        ("barcode type", project.get("barcode_type", "")),
         ("barcode digits", project.get("barcode_value", "")),
     ]
     package_text_layout = (
@@ -163,7 +203,13 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
         f"{_format_fact_rows(package_fact_rows)} "
     )
     certificate_manufacturer = certificate_config.get("manufacturer_name") or _company_name(product, certificate_config)
-    certificate_address = certificate_config.get("manufacturer_address") or certificate_config.get("address") or package_address
+    certificate_address = _certificate_manufacturer_address(certificate_config)
+    certificate_address_fact = f"factory address: {certificate_address}; " if certificate_address else ""
+    certificate_layout_rows = (
+        "品牌, 名称, 规格型号, 生产日期, 生产厂家"
+        + (", 厂址" if certificate_address else "")
+        + ", 检验员"
+    )
     certificate_facts = (
         "Certificate fields: "
         f"brand: {product.get('brand', '')}; "
@@ -171,12 +217,39 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
         f"model: {product.get('model', '')}; "
         f"production date: {certificate_config.get('production_date', '')}; "
         f"manufacturer: {certificate_manufacturer}; "
-        f"factory address: {certificate_address}; "
+        f"{certificate_address_fact}"
         f"barcode type: {project.get('barcode_type', '')}; "
         f"barcode digits: {project.get('barcode_value', '')}. "
     )
+    certificate_address_omission_instruction = (
+        ""
+        if certificate_address
+        else (
+            f"Certificate field whitelist (6 rows): {certificate_layout_rows}. "
+            "本次合格证从上到下仅六行，不得出现第七行：品牌、名称、规格型号、生产日期、生产厂家、检验员。"
+            "标题和条码不计入信息行；严格按这六行重新排版，不得先生成七行模板再清空其中一行。"
+            "合格证厂址省略硬约束：未填写厂址时，禁止印出“厂址”“厂商地址”“地址”及其冒号、横线、空白单元格或占位文字。"
+            "删除整行及行框、预留高度，生产厂家之后直接排检验员，印章和条码区域顺次上移；no blank rows or placeholders. "
+            "此规则优先于参考模板的行数、间距和条码位置，不得从参考图补填或推测地址；这些省略说明本身不得印在合格证上。\n"
+        )
+    )
+    certificate_reference_layout_instruction = (
+        "If the reference certificate has a different border, card proportions, field spacing, stamp style, or barcode zone, keep those certificate design traits while replacing only the readable product data; do not copy old data, camera, background, or product pose. "
+        if certificate_address
+        else (
+            "Preserve its border colors, typography, stamp style, and barcode appearance, but derive the rows and card height from the supplied field list. "
+            "Remove the address row and its cells; move later rows, stamp, and barcode up to close the gap. Do not preserve the original row count or reserved address space. "
+            "Do not copy old data, camera, background, or product pose. "
+        )
+    )
     certificate_reference_instruction = (
-        "A certificate reference image is provided as an additional reference image. The certificate reference image is the highest-priority certificate-card style reference. If the reference certificate has a different border, card proportions, field spacing, stamp style, or barcode zone, keep those certificate design traits while replacing only the readable product data; do not copy old data, barcode digits, date, inspector, camera, background, or product pose. "
+        "A certificate reference image is provided as an additional reference image. "
+        + (
+            "The certificate reference image is the highest-priority certificate-card style reference. "
+            if certificate_address
+            else "The exact six-row field whitelist has priority over the certificate reference. "
+        )
+        + certificate_reference_layout_instruction
         if project.get("has_certificate_reference")
         else "No certificate reference image is provided; generate a simple realistic certificate style based on the product and user-entered certificate fields. "
     )
@@ -192,7 +265,7 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
         else "Use a normal product-appropriate retail package style with realistic structure, lid or flap seams, subtle material texture, and large proportions that fit the uploaded product. Make it designed retail packaging, not an appliance package, and not a decorative poster. "
     )
     package_front_geometry_instruction = (
-        "Keep the package side information area and barcode readable on the visible package side panel. If the package reference uses an angled box perspective, preserve a similar natural retail-product perspective while keeping the side information area upright on its side panel and avoiding unreadable distortion. Do not force the package into a square-on brown-box layout when a reference package is provided. "
+        "Keep the package side information area and barcode readable on the visible package side panel. Preserve the package reference's box construction, panel layout, and print-zone assignments while using the dedicated package camera profile; keep the side information area upright on its panel and avoid unreadable distortion. Do not force the package into a square-on brown-box layout when a reference package is provided. "
         if has_package_reference
         else "The package side panel must be clearly visible and stable enough for readable package printing. Keep the side information zone reasonably visible to the camera, with level side-panel text baselines and no excessive convergence, twisted panels, or unreadable perspective. "
     )
@@ -206,6 +279,8 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
         "The barcode and all information rows must remain fully visible, uncropped, unobstructed, and inside the same side panel. "
         "Package information text and barcode must be locked to the same physical side-panel plane, sharing its perspective, skew, foreshortening, carton fiber, lighting, and edge boundaries; they must not float in the white background, cross outside the side-panel edges, or look like a screen overlay. "
         "The package barcode must not be centered high, placed near the brand wordmark, placed on the front display area, or floating outside the package; it must sit on a real visible package side surface with enough quiet space around it. "
+        "Package surface hard constraint: never print barcode symbology names or parameter-field labels such as EAN-13, EAN_13, 条形码制式, barcode type, barcode format, or barcode standard. "
+        "The barcode symbology is drawing metadata only, not visible package text. "
     )
     package_physical_capacity_instruction = (
         "The package must be physically large enough to contain the uploaded product and every unit implied by the user-entered specification model. "
@@ -224,6 +299,7 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
     certificate_background_instruction = _certificate_background_instruction(product, project)
     certificate_mode_prefix = _certificate_mode_prefix(product, project)
     product_logo_fusion_instruction = _product_logo_fusion_instruction(project)
+    package_surface_product_logo_consistency_instruction = _package_surface_product_logo_consistency_instruction(project)
     main_reference_scope_instruction = _main_reference_scope_instruction()
     main_product_consistency_instruction = _main_product_consistency_instruction()
     is_large_product = _is_large_certificate_product(product, project)
@@ -263,9 +339,9 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
         else "Final result: realistic retail product photo with complete packaging geometry, accurate product structure, controlled highlights, no distorted packaging, crooked typography, warped retail codes, incomplete packaging, floating print layers, or blown-out highlights."
     )
     reference_base = (
-        "Use the provided product reference image as the exact product reference; this is the original upload for the main photo and the generated main product image when generating outputs after the main photo. "
+        "Use the provided product reference image as the product identity reference; this is the original upload for the main photo and the generated main product image when generating outputs after the main photo. Preserve the same product body, structure, proportions, color, material, surface texture, and visible physical markings. The output-specific camera profile controls viewpoint, projection, and framing; re-project the same product into that assigned view instead of carrying over the reference camera angle or foreshortening. Do not invent details on hidden surfaces. "
         + main_reference_scope_instruction
-        + "The provided product reference image may be an angled, side, top-down, or non-front view; preserve the real visible product appearance from that view, including visible side geometry, foreshortening, label perspective, seam direction, cap/lid ellipse, logo position, and any occluded or partially visible surfaces. Do not force the product into a generic front-facing, perfectly symmetrical, or redesigned catalog view. When a new scene camera angle is required, re-project the same real product structure into that camera angle while keeping the reference-view identity and perspective clues consistent. "
+        + "The provided product reference image may be an angled, side, top-down, or non-front view. Preserve the real product details that are visible in it, including side geometry, seam direction, cap or lid shape, and logo placement, while allowing their perspective and foreshortening to change with the assigned camera. Do not redesign the product, and keep unobserved surfaces physically plausible without adding new markings. "
         "All five generated image types must depict the same single uploaded product and preserve the same product style identity across marketplace main photo, certificate co-photo, package co-photo, detail page, and scene photo. Do not switch to a different SKU, package variant, colorway, flavor, label design, logo layout, cap shape, bottle shape, accessory set, or material finish between image types. "
         "User-entered product information is the source of truth for all readable product facts. For generated readable labels, package printing, certificate rows, and detail-page fact text, do not preserve or copy conflicting readable product facts from the uploaded product photo or package reference. If the visual source contains old or conflicting text, keep only the product appearance or package style and replace readable facts with the current user-entered information. "
         "Keep the product structure, color, material, proportions, wear, and surface texture consistent. "
@@ -298,11 +374,17 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
             + clean_product_surface
             + catalog_exposure_control
             + product_logo_fusion_instruction
-            + f"Create a marketplace product main photo for {name}: white sweep or tabletop, only the complete sellable product, filling most of the frame with minimal or no visible floor shadow. Remove source-photo stands and auxiliary objects; reconstruct only the product body in a natural standalone pose."
+            + f"Create a marketplace product main photo for {name}: white sweep or tabletop, only the complete sellable product, filling most of the frame with minimal or no visible floor shadow. Remove source-photo stands and auxiliary objects; reconstruct only the product body in a natural standalone pose. "
+            + _main_view_instruction()
         ),
         "certificate": (
             certificate_mode_prefix
-            + "Create one realistic phone-style angled top-down snapshot of the uploaded product with a readable physical product certificate. "
+            + certificate_address_omission_instruction
+            + (
+                "Create one realistic phone-style angled top-down snapshot of the uploaded product with a readable physical product certificate. "
+                if is_large_product
+                else "Create one realistic phone-style 45-degree oblique high-angle snapshot of the uploaded product with a readable physical product certificate. "
+            )
             + certificate_product_identity_instruction
             + "The output must look like a real camera photograph, not CGI, not a 3D render, and preserve existing physical markings. Generate exactly 1024x1024, 1:1 square. "
             + certificate_view_instruction
@@ -313,7 +395,7 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
             + "Directly generate both the product and the certificate in one natural photo. The certificate, its printed rows, its barcode, and its quality inspection stamp must be generated by the image model as part of the same camera shot. "
             + certificate_reference_instruction
             + certificate_facts
-            + f"Required certificate layout: title 产品合格证 or 合格证; rows 品牌, 名称, 规格型号, 生产日期, 生产厂家, 厂址, 检验员; one red quality inspection stamp based on {_clean_text(certificate_config.get('inspector') or 'QC-01')} and one barcode using the entered barcode type and digits. Only these fields and user-entered values. Stamp: small circular stamp. Certificate text hard constraint: all Chinese field labels and user-entered values on the certificate must be exact, legible, and non-garbled; no pseudo-Chinese, random strokes, mojibake, fake glyphs, unreadable squiggles, substituted characters, or duplicated text rows. QC stamp text hard constraint: inside the red stamp render only QC above and 01 below; do not render Chinese names, long inspector values, random letters, or pseudo text inside the stamp. "
+            + f"Required certificate layout: title 产品合格证 or 合格证; rows {certificate_layout_rows}; one red quality inspection stamp based on {_clean_text(certificate_config.get('inspector') or 'QC-01')} and one barcode using the entered barcode type and digits. Only these fields and user-entered values. Stamp: small circular stamp. Certificate text hard constraint: all Chinese field labels and user-entered values on the certificate must be exact, legible, and non-garbled; no pseudo-Chinese, random strokes, mojibake, fake glyphs, unreadable squiggles, substituted characters, or duplicated text rows. QC stamp text hard constraint: inside the red stamp render only QC above and 01 below; do not render Chinese names, long inspector values, random letters, or pseudo text inside the stamp. "
             "The 检验员 field label must remain visible on the certificate; do not remove, hide, or omit the 检验员 label. Do not print the inspector parameter value as ordinary black text after 检验员; the red quality inspection stamp is the inspector field value. Place the stamp in or near the inspector field value area. Render exactly one small red circular quality inspection stamp directly on the certificate, about two thirds of the previous visual size, and keep the quality inspection stamp completely inside the certificate card boundary, not covering, touching, or overlapping the barcode. "
             "Certificate barcode: one real EAN retail barcode centered on the certificate; left start guard, center guard, and right end guard bars are longer; data bars vary in width and some height, not equal-height decorative stripes; white quiet zones remain on both sides; digits follow EAN layout with the first digit outside left and the remaining digits below as 6 left digits + 6 right digits. Barcode numerals must exactly match the entered barcode digits, regular weight, not scrambled, missing, substituted, bold, or fused into bars. Use black/dark gray printing; avoid garbled characters, pseudo text, duplicate text blocks, QR codes, and unrelated fields. "
             "Product red elements are allowed only when they already exist in the uploaded product reference. Do not transfer certificate inspector-stamp semantics onto the product; certificate-only inspector stamp must not appear on product switches or product parts. Do not run any global red-color removal."
@@ -324,6 +406,7 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
             + real_photo
             + package_product_scene_instruction
             + package_reference_instruction
+            + ("" if package_address else missing_address_instruction)
             + "The scene must keep a clean seamless pure #ffffff white background and pure white matte tabletop with no horizon line, wall, table edge, floor, colored background, props, or clutter. "
             "Package color hard constraint: do not generate a black-and-white, grayscale, monochrome, or desaturated package image; keep full-color retail package. "
             "Package size rule: the box must be large and visibly able to contain the product in its realistic packed state, using folded, nested, detached, or storage volume when the product is large or long equipment, plus full specified quantity, padding, and closure room. Enlarge panels and re-layout package text, logos, barcode, illustrations, and graphics without stretching or warping. If the square frame is tight, crop or reduce the visible product instead of shrinking the package. Do not default to a tall narrow bottle package, high box, or vertical box shape. For headphones or earphones, use a medium-small box wider and shallower than a bottle package, sized for folded or nested earcups and headband; never use a thermos-style package for headphones. "
@@ -334,13 +417,15 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
             + package_product_pose_instruction
             + package_front_geometry_instruction
             + package_side_instruction
+            + _package_view_instruction(is_large_product=is_large_product)
             + "The package front must have no unnecessary artificial printed border unless that border style comes from the package reference. The ordinary package information area must be on the visible package side panel only. Do not create a front information area; the front may carry the upper-left brand wordmark, product image, illustration, or decorative design, but ordinary rows and barcode must stay on the side panel. The model must directly print the package text and barcode on the package surface as native ink or printed packaging graphics, not as a floating sticker, overlay, or separate label. "
+            + package_surface_product_logo_consistency_instruction
             + package_brand_wordmark
             + package_facts
             + package_text_layout
-            + "On the package, print every non-empty user-entered product-information field above as authoritative facts; show each complete value in full exactly once. At minimum, show full product name, specification/model, manufacturer, address, barcode type, and barcode digits when provided; do not omit, truncate, abbreviate, merge, mask, or replace any provided value. If the side panel is small, enlarge the information area, reduce decoration, increase print size, or adjust perspective before sacrificing information. Do not show values not entered by the user or copied from another product, package reference, or old source-image text; do not invent replacements. Render only exact compatible Chinese and Latin characters. no garbled characters, no pseudo text, no random English replacement words, no hallucinated brand, no duplicate text blocks, no unrelated product facts, and no invented labels. Keep package text upright, level, complete, and aligned like normal printing. "
+            + "On the package, print every non-empty user-entered product-information field above as authoritative facts; show each complete value in full exactly once. At minimum, show full product name, specification/model, manufacturer, address, and barcode digits when provided; do not omit, truncate, abbreviate, merge, mask, or replace any provided value. If the side panel is small, enlarge the information area, reduce decoration, increase print size, or adjust perspective before sacrificing information. Do not show values not entered by the user or copied from another product, package reference, or old source-image text; do not invent replacements. Render only exact compatible Chinese and Latin characters. no garbled characters, no pseudo text, no random English replacement words, no hallucinated brand, no duplicate text blocks, no unrelated product facts, and no invented labels. Keep package text upright, level, complete, and aligned like normal printing. "
             + package_barcode_position_instruction
-            + "The barcode must be drawn directly on the visible package surface from the barcode type and barcode digits above, like a real EAN retail barcode. The first digit outside the barcode bars on the left; first digit must sit left of the start guard bars, outside the bar area; left six digits start after the start guard with the second barcode digit; the first digit must not appear below vertical bars or inside the left six-digit group. The remaining digits sit below the bars in two groups with a center guard before the right group; start guard two bars, center guard two bars before the eighth digit, and end guard two bars are the longest. The bars must vary naturally in width and height like a real EAN retail barcode, with thin and thick vertical bars, clean white gaps, realistic quiet zones, and no decorative simplification. barcode digits must be clear, regular weight, and not bold; barcode digits must not be missing, truncated, omitted, substituted, reordered, or incomplete; not bold, not blurry, not thickened, not smeared, and not fused into the vertical code bars. Use one barcode block only, with readable digits below the bars, sized realistically for the package. no malformed barcode shape, no broken barcode structure, no decorative fake barcode shape, no collapsed bars, no missing guard bars, no merged bars, no random barcode-like stripes, and no incorrect barcode geometry. "
+            + "The barcode must be drawn directly on the visible package surface from the configured barcode symbology and barcode digits above, like a real EAN retail barcode. The first digit outside the barcode bars on the left; first digit must sit left of the start guard bars, outside the bar area; left six digits start after the start guard with the second barcode digit; the first digit must not appear below vertical bars or inside the left six-digit group. The remaining digits sit below the bars in two groups with a center guard before the right group; start guard two bars, center guard two bars before the eighth digit, and end guard two bars are the longest. The bars must vary naturally in width and height like a real EAN retail barcode, with thin and thick vertical bars, clean white gaps, realistic quiet zones, and no decorative simplification. barcode digits must be clear, regular weight, and not bold; barcode digits must not be missing, truncated, omitted, substituted, reordered, or incomplete; not bold, not blurry, not thickened, not smeared, and not fused into the vertical code bars. Use one barcode block only, with readable digits below the bars, sized realistically for the package. no malformed barcode shape, no broken barcode structure, no decorative fake barcode shape, no collapsed bars, no missing guard bars, no merged bars, no random barcode-like stripes, and no incorrect barcode geometry. "
             "Do not add handling marks, up arrows, moisture marks, random labels, unrelated QR/code graphics, warning symbols, stickers, badges, certifications, or duplicate barcode blocks; avoid unrelated warning symbols. "
             + package_product_identity_instruction
             + package_completion_instruction
@@ -362,6 +447,8 @@ def _prompt_for(output_type: str, product: dict[str, Any], project: dict[str, An
             + _scene_instruction(category)
         ),
     }
+    if output_type == "package" and _is_car_product_volume(project):
+        return prompts["scene"]
     return prompts[output_type]
 
 
@@ -424,12 +511,20 @@ SMALL_CERTIFICATE_PRODUCT_TOKENS = (
 )
 
 
-def _is_large_certificate_product(product: dict[str, Any], project: dict[str, Any] | None = None) -> bool:
+def _project_product_volume(project: dict[str, Any] | None) -> str:
     certificate_config = project.get("certificate_config", {}) if isinstance(project, dict) else {}
     if not isinstance(certificate_config, dict):
         certificate_config = {}
-    product_volume = _clean_text(certificate_config.get("product_volume", "")).lower()
-    if product_volume == "large":
+    return _clean_text(certificate_config.get("product_volume", "")).lower()
+
+
+def _is_car_product_volume(project: dict[str, Any] | None) -> bool:
+    return _project_product_volume(project) == "car"
+
+
+def _is_large_certificate_product(product: dict[str, Any], project: dict[str, Any] | None = None) -> bool:
+    product_volume = _project_product_volume(project)
+    if product_volume in {"large", "car"}:
         return True
     if product_volume == "small":
         return False
@@ -442,9 +537,8 @@ def _is_large_certificate_product(product: dict[str, Any], project: dict[str, An
 def _certificate_composition_instruction(product: dict[str, Any], project: dict[str, Any] | None = None) -> str:
     if _is_large_certificate_product(product, project):
         return (
-            "Large-product certificate composition is active: product must show a cropped close partial view, "
-            "not the complete object; show about one third of the large product. Show recognizable functional structure. "
-            "Do not show the full product or shrink a bulky product into toy scale. "
+            "Large-product certificate composition is active: product must show a cropped close partial view, not the complete object; "
+            "show about one third of the large product. Do not show the full product; no toy scale. "
         )
     return (
         "Small-product certificate composition is active: Small products should remain fully visible when possible, "
@@ -454,18 +548,36 @@ def _certificate_composition_instruction(product: dict[str, Any], project: dict[
 
 def _certificate_product_identity_instruction(product: dict[str, Any], project: dict[str, Any] | None = None) -> str:
     main_product_consistency_instruction = _main_product_consistency_instruction()
+    product_identity_camera_rule = (
+        "Treat the provided product image as the product identity reference. Preserve its body, structure, proportions, color, material, texture, and visible markings; "
+        "the output-specific camera profile controls viewpoint and framing. Re-project the same product into that profile without copying reference foreshortening. "
+        "Do not invent details on hidden surfaces. "
+    )
+    large_certificate_product_identity_instruction = (
+        "Certificate co-photo: cropped large-product part must match main image in structure, color, material, proportions, markings. "
+        "product-surface logo may be absent when crop excludes the logo area. "
+        "If logo area is visible, keep it on the same part and side/panel, at the same relative placement and scale; render from the assigned camera. "
+        "Do not split, disassemble, bend, melt, stretch, squeeze, warp, break, duplicate, or deform the cropped product body. "
+        "Keep original geometry and scale relationships; panels, wheels, handles, guards, seams, edges, and hardware must not shift. "
+    )
+    certificate_logo_position_instruction = (
+        "Certificate co-photo product identity hard constraint: match the generated main product image, with special priority on product-surface logo position. "
+        "Keep the logo on the same product part; same side or panel, with the same relative height, placement, and scale, rendered from the assigned camera. "
+        "Do not move the logo to another door, panel, corner, handle area, label zone, package, certificate, background, or image corner; do not mirror, duplicate, resize, or redesign it. "
+        "Logo visibility follows the assigned view: if its original surface is hidden, let it be naturally occluded; do not relocate it to make it visible. Keep every marking on a visible surface intact. "
+    )
     if _is_large_certificate_product(product, project):
         return (
-            "Use uploaded product as the only product reference; preserve color, material, markings, proportions, and structure. "
-            + _main_reference_scope_instruction()
-            + main_product_consistency_instruction
-            +
-            "No SKU switch, redesign, 2D silhouette lock, supports, floating, tipping, impossible balance, or intersection. "
+            "Use uploaded product/main image only; ignore the standalone brand logo and add no corner logo. "
+            + large_certificate_product_identity_instruction
+            + "Use assigned camera; don't copy reference foreshortening or invent hidden markings. No SKU change, float/tip, imbalance, or intersection. "
         )
     return (
         "Use the uploaded product image as the only product reference. "
+        + product_identity_camera_rule
         + _main_reference_scope_instruction()
         + main_product_consistency_instruction
+        + certificate_logo_position_instruction
         + "All five generated image types must depict the same single uploaded product and same product style identity. Do not switch to a different SKU, package variant, colorway, flavor, label design, logo layout, cap shape, bottle shape, accessory set, or material finish. Preserve color, material, texture, markings, proportions, and recognizable structure; do not lock to the uploaded 2D silhouette or camera angle. Remove non-product supports. Choose the product's orientation from its real structure, center of gravity, and normal display logic; do not mechanically force every product to stand upright. Re-place the product naturally with no floating, no tipping, no impossible balance, no intersection. "
     )
 
@@ -473,8 +585,7 @@ def _certificate_product_identity_instruction(product: dict[str, Any], project: 
 def _certificate_background_instruction(product: dict[str, Any], project: dict[str, Any] | None = None) -> str:
     if _is_large_certificate_product(product, project):
         return (
-            "Use a pure white background and flat white support; no environment, props, floor shadows, or tabletop contact shadow. "
-            "Keep clean product edges; no curved sweep backdrop, gray gradient, off-white texture, or speckled noise. "
+            "Use a pure white background and flat white support; no environment, props, floor shadows, tabletop contact shadow, curved sweep backdrop, gray gradient, off-white texture, or speckled noise. Keep clean product edges. "
         )
     return (
         "Use a pure white background and a single flat, level, uncurved horizontal plane with no horizon line, no wall, no window curtain, no visible table edge, no floor, no props, no desk accessories, no plants, no hands, and no unrelated objects. Keep clean product edges; do not add floor shadows; no tabletop contact shadow; no curved sweep backdrop, no concave or convex support surface, no gray gradient, no off-white texture, no speckled background noise, and no gray or beige shadow patch. "
@@ -482,12 +593,22 @@ def _certificate_background_instruction(product: dict[str, Any], project: dict[s
 
 
 def _certificate_placement_instruction(product: dict[str, Any], project: dict[str, Any] | None = None) -> str:
+    if _is_car_product_volume(project):
+        return (
+            "Fixed vehicle-seat certificate placement: place the certificate on the visible vehicle seat only, naturally laid on the seat cushion and readable; "
+            "do not improvise another placement; do not place it on the hood, tire, floor, cargo bed, background, or beside the vehicle. "
+            "Spatial and gravity logic hard constraint: must physically conform to the seat plane; no impossible tilt; no angle that severely conflicts with real placement. "
+            "Car certificate text anti-garbled hard constraint: strictly legible Chinese field labels, values, barcode digits, and QC stamp; no pseudo-Chinese, mojibake, random strokes, fake glyphs, or duplicated rows. "
+            "Use close phone camera about 0.5m away, 1.7m high, tilted down 30 degrees. "
+            "Certificate must look naturally co-photographed with the vehicle seat, not floating/pasted/embedded/distorted. "
+        )
     if _is_large_certificate_product(product, project):
         return (
-            "Large-product certificate scale rule: certificate about half the previous foreground visual size; "
-            "place the certificate on top of the large product on a visible stable surface, fully visible and readable. "
-            "Use camera about 0.5 meters from the product, 1.7 meters high, tilted downward about 30 degrees. "
-            "Certificate must look like a real card in the same camera shot, not a floating overlay or pasted layer. "
+            "Fixed large-product top placement: certificate about half previous size; "
+            "fixed on the product top, rest naturally on top of the visible large-product surface; do not place the certificate beside the product or cover key parts. "
+            "Spatial and gravity logic hard constraint: must physically conform to the support plane of the visible product surface; no impossible tilt; no angle that severely conflicts with real placement. "
+            "Use close phone camera about 0.5m away, 1.7m high, tilted down 30 degrees. "
+            "Certificate must look naturally co-photographed with the product part, not floating/pasted/embedded/distorted. "
         )
     return (
         "The certificate position is flexible: place it in a natural lower, side, foreground, or stable product-surface area where the full certificate face is visible and readable. readability has priority over making the certificate tiny. "
@@ -498,12 +619,39 @@ def _certificate_placement_instruction(product: dict[str, Any], project: dict[st
 def _certificate_view_instruction(product: dict[str, Any], project: dict[str, Any] | None = None) -> str:
     if _is_large_certificate_product(product, project):
         return (
-            "Use a close phone snapshot view, not a full top-down flat-lay and not a straight front view. "
-            "Keep the final feeling as 真实自然的手机随手拍, not commercial studio product advertising. "
+            "Large certificate view: close front-right phone snapshot, 30° down; retain crop/placement. Natural, not studio. "
         )
     return (
-        "Use a high front-left angled top-down phone viewpoint: camera above and slightly in front-left, lens angled downward about 50 to 55 degrees, "
-        "like a 28 to 35 mm phone wide-angle lens, not a full top-down flat-lay and not a straight front view. Keep the final feeling as 真实自然的手机随手拍, not commercial studio product advertising. "
+        "Certificate camera profile: use a 45-degree oblique high-angle view, with the camera above and diagonally offset from the product and the lens angled downward at 45 degrees to the horizontal support plane. "
+        "Keep the product in its physically natural resting pose; change the camera view, not the product's structure or balance. "
+        "This viewpoint must differ from the main image's front view and the package co-photo's left-side product view. Keep the entire certificate face readable. "
+        "Use a 28 to 35 mm phone wide-angle lens. Keep the final feeling as 真实自然的手机随手拍, not commercial studio product advertising. "
+    )
+
+
+def _main_view_instruction() -> str:
+    return (
+        "Main image camera profile: use a straight-on front view, with the camera level with the product and the optical axis perpendicular to its front. "
+        "Keep the product's front face parallel to the image plane; no left/right three-quarter angle and no downward tilt. Keep the product in its physically natural retail pose. "
+    )
+
+
+def _package_view_instruction(*, is_large_product: bool) -> str:
+    if is_large_product:
+        return (
+            "Large-product package camera profile: use a front-right three-quarter view of the package, with the camera angled downward about 25 to 35 degrees. "
+            "Keep the package in its physically natural position while making the package information side panel and barcode clearly visible. "
+        )
+    return (
+        "Package co-photo camera profile: use a left-side product view, showing the product's own left side relative to its front established in the main image. "
+        "Keep the camera level with the product and the optical axis perpendicular to its left side. This means viewing its left side, not moving the product to the left of the frame. Do not mirror the product. "
+        "Keep the product in its physically natural resting pose; do not tip it or force it upright to reveal features. "
+        "Keep the logo on its original physical part with the same relative placement and scale; if its surface is naturally hidden by this view, do not relocate it to make it visible. Preserve all markings on visible surfaces. "
+        "The carton is not constrained to a left view: orient the carton independently while keeping it complete and the package information side panel and barcode clearly visible. "
+        "Package co-photo print anchoring hard constraint: every product-information row and the entire barcode, including its digits and quiet zones, must be printed inside the boundary of a real visible carton side panel. "
+        "The information block must share that panel's perspective, foreshortening, material texture, lighting, and surface shading, with no gap or independent shadow between ink and carton. "
+        "Never move information into the white background or onto the tabletop, into mid-air, a floating card, a separate information board, or a screen-facing overlay to make it readable. "
+        "If the panel is too narrow, rotate or enlarge the carton and re-layout within that same physical panel; keep the product's left-side view and never detach the text or barcode from the carton. "
     )
 
 
@@ -529,6 +677,16 @@ def _product_logo_fusion_instruction(project: dict[str, Any]) -> str:
         "When a logo reference image is provided and product_logo_enabled is true, one manufactured product-surface logo must appear on the product body itself as native printing, engraving, embossing, woven label, molded mark, or material-integrated marking. "
         "The product itself must carry the logo; do not satisfy this requirement by placing a logo in the image corner, background, floating overlay, package, tag, watermark, or caption. "
         "The product-surface logo copy must be fully visible, preserve the reference logo design, follow product perspective, surface curvature, material grain, local lighting, shadow, reflection, embossing or ink behavior, and occupy about 5% of the total visible product area. It must look manufactured on the product, not directly pasted on afterward. "
+    )
+
+
+def _package_surface_product_logo_consistency_instruction(project: dict[str, Any]) -> str:
+    if not _product_logo_enabled(project):
+        return ""
+    return (
+        "Package-surface product image logo consistency hard constraint: any product photo, product illustration, product thumbnail, product render, or product picture printed on the package exterior must match the generated main product image, including the same manufactured product-surface logo fusion, product body, structure, proportions, color, material, surface texture, logo position, and visible markings. "
+        "If the package exterior shows the product, the shown product must carry the same product-surface logo as the main product image; do not keep only a similar logo while replacing, redesigning, recoloring, resizing, simplifying, or changing the product body. "
+        "Do not satisfy this package requirement by placing the logo as a package corner mark, standalone package brand wordmark, background sticker, watermark, floating overlay, tag, or decorative badge; the requirement applies to the product image printed on the package exterior itself. "
     )
 
 
@@ -876,29 +1034,29 @@ def _detail_locked_usage_scenes(product: dict[str, Any]) -> list[dict[str, str]]
             "title": "核心使用",
             "subtitle": "主要任务发生",
             "place": "使用现场",
-            "environment": f"primary active-use place for {name}",
-            "elements": "goal A, user A, props A, light A",
+            "environment": f"primary use place for {name}",
+            "elements": "goalA,userA,propsA,lightA",
         },
         {
             "title": "协作使用",
             "subtitle": "多人流程发生",
             "place": "协作场地",
-            "environment": f"collaborative active-use place for {name}",
-            "elements": "goal B, user B, props B, light B",
+            "environment": f"collab use place for {name}",
+            "elements": "goalB,userB,propsB,lightB",
         },
         {
             "title": "移动使用",
             "subtitle": "位置变化发生",
             "place": "移动现场",
-            "environment": f"mobile active-use place for {name}",
-            "elements": "goal C, user C, props C, light C",
+            "environment": f"mobile use place for {name}",
+            "elements": "goalC,userC,propsC,lightC",
         },
         {
             "title": "专业使用",
             "subtitle": "规范操作发生",
             "place": "专业场所",
-            "environment": f"specialized active-use place for {name}",
-            "elements": "goal D, user D, props D, light D",
+            "environment": f"specialized use place for {name}",
+            "elements": "goalD,userD,propsD,lightD",
         },
     ]
 
@@ -906,10 +1064,10 @@ def _detail_locked_usage_scenes(product: dict[str, Any]) -> list[dict[str, str]]
 def _format_detail_locked_usage_scene_plan(product: dict[str, Any]) -> str:
     scenes = _detail_locked_usage_scenes(product)
     render_styles = [
-        "wide documentary, 28mm, warm morning, open frame",
-        "architecture context, 35mm, cool daylight, ordered frame",
-        "close environment process, 50mm, side light, shallow depth",
-        "high-angle establishing, 24mm, dusk mixed light, deep layers",
+        "wide 28mm warm",
+        "ordered 35mm cool",
+        "close 50mm side",
+        "high 24mm dusk",
     ]
     lines = []
     for index, scene in enumerate(scenes, start=1):
@@ -982,23 +1140,24 @@ def _detail_module_prompts(product: dict[str, Any]) -> list[str]:
         "Do not invent unsupported specifications, measurements, certifications, or material claims; base all text on visible product traits and provided product facts only. "
     )
     usage_scene_environment_instruction = (
-        "Use realistic usage environments. Environment-first scene rule: main subject of each scene should be the realistic place where this product is normally used, installed, accessed, or naturally appears. "
+        "Use realistic usage environments. Environment-first scene rule: main subject of each scene should be the realistic place where this product is used. "
         "Usage scenes are environment-context images, not product display images. Do not center, enlarge, or hero-render the product. "
-        "Product absence hard constraint: Do not render the product itself in usage-scene panels; show only the realistic environment where the product could reasonably be used. "
-        "Do not show the product as small, partial, distant, reflected, cropped, background, silhouette, icon, package, poster, label, screen image, or repeated visual motif. "
+        "Product absence hard constraint: Do not render the product itself in usage-scene panels; show only its realistic use environment. "
+        "No product thumbnails, silhouettes, package art, posters, labels, screens, repeated motifs. "
         "使用场景图以真实使用环境为主。 "
     )
     shared_scene_caption_style = (
         "Shared scene-caption style: Caption style hard constraint. Scene 1-4 captions must use identical font style, size, weight, color, placement, label shape, spacing, and short Chinese wording. "
-        "Captions must never be only Scene 1, Scene 2, Scene 3, or Scene 4. Scene caption text rule: use only the application place name matching the locked scene environment. Render one short Chinese location label only, location or place noun only. Do not include usage purpose, user action, selling point, product function, or descriptive phrase. Do not include verbs or use-purpose words. No subtitle, no slogan, no sentence, no feature claim, no long explanation. "
-        "Use one identical caption block template for all four captions; must strictly reuse this exact caption block template; same background or label box, opacity, padding, alignment, line height, and corner radius. Exact template: bottom-left of each scene panel; semi-transparent charcoal black rgba(20,20,20,0.68); text color pure white #FFFFFF; clean bold Chinese Heiti/Sans-serif; single label size 22-26px equivalent; border radius 6-8px; padding 12-16px. "
+        "Caption text hard constraint: Render visible Chinese caption text in all four scenes. Caption style may be plain text with no label box; same style for Scene 1-4; font size, caption background color, and caption font color must be identical across Scene 1-4. Do not mix boxed, unboxed, styled, and plain captions. "
+        "Captions must never be only Scene 1, Scene 2, Scene 3, or Scene 4. Scene caption text rule: use only the application place name matching the locked scene environment. Render one short Chinese location label only, location or place noun only. Do not include usage purpose, user action, selling point, product function, or descriptive phrase. Do not include verbs or use-purpose words. No subtitle, no slogan, no sentence. "
+        "Use one identical caption block template for all four captions; must strictly reuse this exact caption block template; same background or label box, opacity, padding, alignment, line height, and corner radius. If using plain text with no label box, all four scenes must use the same plain text treatment: same position/font/size/weight/color/alignment/spacing. Box template: bottom-left of each scene panel; semi-transparent charcoal black rgba(20,20,20,0.68); text color pure white #FFFFFF; clean bold Chinese Heiti/Sans-serif; single label size 22-26px equivalent; border radius 6-8px; padding 12-16px. "
         "Caption wording hard constraint: caption style must stay identical, but caption text must be different for each scene. Every scene-name label must be different. Never reuse identical caption wording across Scene 1, Scene 2, Scene 3, and Scene 4. "
         "Never change the caption block style between Scene 1, Scene 2, Scene 3, and Scene 4. Do not vary caption typography between scenes. "
     )
     four_scene_exclusivity_instruction = (
         f"{shared_scene_plan}"
         f"{shared_scene_caption_style}"
-        "Detail usage-scene hard constraints: product-fit, complete four-scene uniqueness, identical caption style, and different caption text are mandatory. "
+        "Detail usage-scene hard constraints: product-fit, complete four-scene uniqueness, required caption text, and globally consistent caption style are mandatory. "
         "Scene allocation is fixed across the two usage-scene images. Use only the locked scene descriptions listed above. Four-scene uniqueness hard constraint: Scene 1, Scene 2, Scene 3, and Scene 4 must be completely different use cases and completely different environment types; user goal, environment, props, user action, camera angle, composition, lighting, background, and caption wording must differ. Duplicate-scene absolute ban: No two scenes may share the same place type, room type, institution type, user group, activity purpose, environment category, visible props, furniture, tools, vehicles, landscape elements, architectural elements, signage style, or background objects. If two scenes could receive the same short caption or the same environment label, regenerate one of them. Difference-scale hard constraint: indoor/outdoor status, public/private context, camera distance, lens feel, lighting color temperature, time of day, color palette, and render style must be different for Scene 1, Scene 2, Scene 3, and Scene 4. Shared-element limit hard constraint: any two scenes may share at most 10% of visible elements; at least 90% of environment, props, action, camera angle, composition, lighting, background, and caption wording must differ. The four scenes must be mutually exclusive, genuinely different real camera moments. Do not reuse the same environment, props, action, camera angle, composition, lighting, caption, or background with small changes. "
         "Lay exactly two aligned real-world usage scenes left-to-right; no duplicate/fifth. "
     )
@@ -1159,9 +1318,11 @@ def _build_detail_page(sources: list[Image.Image], product: dict[str, Any], proj
     while len(module_images) < 4:
         module_images.append(module_images[-1])
 
-    sections = [_fit_width(source, 800) for source in module_images[:4]]
-    total_height = sum(section.height for section in sections)
-    canvas = Image.new("RGB", (800, total_height), "white")
+    sections = [
+        ImageOps.fit(source.convert("RGB"), (800, 800), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+        for source in module_images[:4]
+    ]
+    canvas = Image.new("RGB", (800, 3200), "white")
     y = 0
     for section in sections:
         canvas.paste(section, (0, y))
@@ -1170,18 +1331,26 @@ def _build_detail_page(sources: list[Image.Image], product: dict[str, Any], proj
     return canvas
 
 
+def _certificate_manufacturer_address(config: dict[str, Any]) -> str:
+    # An explicitly empty current field means omission, not a request for legacy fallback.
+    # Package information must not add a field to the certificate's own schema.
+    return _clean_text(config.get("manufacturer_address", config.get("address", "")))
+
+
 def _certificate_rows(product: dict[str, Any], project: dict[str, Any]) -> list[tuple[str, str]]:
     config = project.get("certificate_config", {}) if isinstance(project.get("certificate_config", {}), dict) else {}
     manufacturer_name = config.get("manufacturer_name") or _company_name(product, config)
-    manufacturer_address = config.get("manufacturer_address") or config.get("address") or ""
-    return [
+    manufacturer_address = _certificate_manufacturer_address(config)
+    rows = [
         ("品牌", _clip(product.get("brand", ""), 16)),
         ("名称", _clip(product.get("name", ""), 18)),
         ("规格型号", _clip(_spec_model_text(product), 20)),
         ("生产日期", _clip(config.get("production_date") or _date_text(project.get("created_at")), 16)),
         ("生产厂家", _clip(manufacturer_name, 18)),
-        ("厂址", _clip(manufacturer_address, 24)),
     ]
+    if manufacturer_address:
+        rows.append(("厂址", _clip(manufacturer_address, 24)))
+    return rows
 
 
 def _compose_certificate(image: Image.Image, product: dict[str, Any], project: dict[str, Any], font_path: str) -> None:
@@ -1839,7 +2008,7 @@ def _compose_package_label(image: Image.Image, product: dict[str, Any], project:
         or package_config.get("company_name")
         or _company_name(product, certificate_config)
     )
-    manufacturer_address = package_config.get("manufacturer_address") or package_config.get("address") or ""
+    manufacturer_address = _clean_text(package_config.get("manufacturer_address") or package_config.get("address") or "")
     rows = [
         ("品名", product.get("name", "")),
         ("规格型号", product.get("model", "")),

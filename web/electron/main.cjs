@@ -99,9 +99,23 @@ function buildProxyTarget(requestUrl, apiBaseUrl = process.env.ZHIFENG_API_BASE_
   return new URL(`${incomingUrl.pathname}${incomingUrl.search}`, normalizeApiBaseUrl(apiBaseUrl)).toString();
 }
 
-function createRendererServer({ distDir, apiBaseUrl = process.env.ZHIFENG_API_BASE_URL, host = "127.0.0.1", port = 0 }) {
+const BLOCKED_RENDERER_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111,
+  113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548,
+  554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 5060, 5061, 6000, 6566, 6697,
+  10080,
+]);
+
+function createRendererServer({
+  distDir,
+  apiBaseUrl = process.env.ZHIFENG_API_BASE_URL,
+  host = "127.0.0.1",
+  port = 0,
+  isBlockedPort = isBlockedRendererPort,
+  maxPortAttempts = 10,
+}) {
   const resolvedDist = path.resolve(distDir);
-  const server = http.createServer((request, response) => {
+  const requestListener = (request, response) => {
     if (!request.url) {
       response.writeHead(400);
       response.end("Bad request");
@@ -114,7 +128,20 @@ function createRendererServer({ distDir, apiBaseUrl = process.env.ZHIFENG_API_BA
     }
 
     serveStaticFile(request, response, resolvedDist);
+  };
+
+  return listenRendererServer({
+    attempt: 1,
+    host,
+    isBlockedPort,
+    maxPortAttempts,
+    port,
+    requestListener,
   });
+}
+
+function listenRendererServer({ attempt, host, isBlockedPort, maxPortAttempts, port, requestListener }) {
+  const server = http.createServer(requestListener);
 
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -122,6 +149,29 @@ function createRendererServer({ distDir, apiBaseUrl = process.env.ZHIFENG_API_BA
       server.off("error", reject);
       const address = server.address();
       const selectedPort = typeof address === "object" && address ? address.port : port;
+      if (port === 0 && isBlockedPort(selectedPort)) {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          if (attempt >= maxPortAttempts) {
+            reject(new Error(`Could not allocate an allowed renderer port after ${maxPortAttempts} attempts.`));
+            return;
+          }
+          resolve(
+            listenRendererServer({
+              attempt: attempt + 1,
+              host,
+              isBlockedPort,
+              maxPortAttempts,
+              port,
+              requestListener,
+            }),
+          );
+        });
+        return;
+      }
       resolve({
         url: `http://${host}:${selectedPort}`,
         close: () =>
@@ -131,6 +181,11 @@ function createRendererServer({ distDir, apiBaseUrl = process.env.ZHIFENG_API_BA
       });
     });
   });
+}
+
+function isBlockedRendererPort(port) {
+  const value = Number(port);
+  return BLOCKED_RENDERER_PORTS.has(value) || (value >= 6665 && value <= 6669);
 }
 
 function proxyApiRequest(request, response, apiBaseUrl) {
@@ -292,6 +347,7 @@ module.exports = {
   createUpdateInstallHandler,
   createRendererServer,
   downloadUpdateInstaller,
+  isBlockedRendererPort,
   isSafeExternalUrl,
   launchInstaller,
   normalizeApiBaseUrl,

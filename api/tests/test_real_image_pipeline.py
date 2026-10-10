@@ -149,11 +149,17 @@ class RealImagePipelinePromptTests(unittest.TestCase):
 
         prompt = _prompt_for("certificate", product, project)
 
-        self.assertLessEqual(len(prompt), 5400)
-        self.assertIn("certificate about half the previous foreground visual size", prompt)
+        self.assertLessEqual(len(prompt), 5600)
+        self.assertIn("certificate about half previous size", prompt)
         self.assertIn("show about one third of the large product", prompt)
-        self.assertIn("place the certificate on top of the large product", prompt)
+        self.assertIn("rest naturally on top of the visible large-product surface", prompt)
+        self.assertIn("Keep original geometry and scale relationships", prompt)
         self.assertIn("The certificate reference image is the highest-priority certificate-card style reference", prompt)
+        self.assertIn("product-surface logo may be absent when crop excludes the logo area", prompt)
+        self.assertIn("Large certificate view", prompt)
+        self.assertIn("front-right", prompt)
+        self.assertIn("30° down", prompt)
+        self.assertNotIn("opposite main front-left", prompt)
         self.assertNotIn("50 to 55 degrees", prompt)
 
     def test_certificate_prompt_uses_cropped_feature_composition_for_large_products(self):
@@ -212,6 +218,50 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertNotIn("product physical resting pose", prompt)
         self.assertNotIn("top of the product", prompt)
         self.assertNotIn("Main-product reference hard constraint", prompt)
+        self.assertIn("front-right three-quarter view of the package", prompt)
+        self.assertIn("25 to 35 degrees", prompt)
+        self.assertNotIn("left-side product view", prompt)
+        self.assertNotIn("side opposite the main image", prompt)
+
+    def test_car_product_volume_package_prompt_uses_scene_photo_prompt(self):
+        product = {"name": "智枫产品", "brand": "智枫", "model": "ZF-CAR-01", "category": "通用商品"}
+        project = {
+            "certificate_config": {"product_volume": "car"},
+            "barcode_type": "EAN_13",
+            "barcode_value": "6979051758366",
+        }
+
+        package_prompt = _prompt_for("package", product, project)
+        scene_prompt = _prompt_for("scene", product, project)
+
+        self.assertEqual(package_prompt, scene_prompt)
+        self.assertIn("Show a realistic product-in-use scene", package_prompt)
+        self.assertIn("Scene product identity hard constraint", package_prompt)
+        self.assertNotIn("Large-product package-only mode is active", package_prompt)
+        self.assertNotIn("Candidate package information to print directly on the package surface", package_prompt)
+
+    def test_car_product_volume_certificate_prompt_uses_large_product_mode(self):
+        prompt = _prompt_for(
+            "certificate",
+            {"name": "智枫产品", "brand": "智枫", "model": "ZF-CAR-01", "category": "通用商品"},
+            {
+                "certificate_config": {"product_volume": "car"},
+                "barcode_type": "EAN_13",
+                "barcode_value": "6979051758366",
+            },
+        )
+
+        self.assertIn("HARD LARGE-PRODUCT CERTIFICATE MODE", prompt)
+        self.assertIn("Large-product certificate composition is active", prompt)
+        self.assertIn("Fixed vehicle-seat certificate placement", prompt)
+        self.assertIn("place the certificate on the visible vehicle seat only", prompt)
+        self.assertIn("do not improvise another placement", prompt)
+        self.assertIn("do not place it on the hood, tire, floor, cargo bed, background, or beside the vehicle", prompt)
+        self.assertIn("Car certificate text anti-garbled hard constraint", prompt)
+        self.assertIn("strictly legible Chinese", prompt)
+        self.assertNotIn("rest naturally on top of the visible large-product surface", prompt)
+        self.assertIn("close front-right phone snapshot, 30° down", prompt)
+        self.assertNotIn("90 degrees", prompt)
 
     def test_small_product_package_prompt_keeps_product_and_package_cophoto(self):
         prompt = _prompt_for(
@@ -251,6 +301,32 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("not directly pasted on afterward", enabled_prompt)
         self.assertIn("about 5% of the total visible product area", enabled_prompt)
         self.assertNotIn("Product-logo fusion hard constraint", disabled_prompt)
+
+    def test_package_prompt_requires_package_surface_product_to_keep_main_product_logo_when_enabled(self):
+        enabled_prompt = _prompt_for(
+            "package",
+            {"name": "智枫水杯", "brand": "智枫", "model": "ZF-LOGO"},
+            {
+                "style_config": {"product_logo_enabled": True},
+                "barcode_type": "EAN_13",
+                "barcode_value": "6903244675147",
+            },
+        )
+        disabled_prompt = _prompt_for(
+            "package",
+            {"name": "智枫水杯", "brand": "智枫", "model": "ZF-LOGO"},
+            {
+                "style_config": {"product_logo_enabled": False},
+                "barcode_type": "EAN_13",
+                "barcode_value": "6903244675147",
+            },
+        )
+
+        self.assertIn("Package-surface product image logo consistency hard constraint", enabled_prompt)
+        self.assertIn("any product photo, product illustration, product thumbnail, product render, or product picture printed on the package exterior must match the generated main product image", enabled_prompt)
+        self.assertIn("including the same manufactured product-surface logo fusion", enabled_prompt)
+        self.assertIn("Do not satisfy this package requirement by placing the logo as a package corner mark", enabled_prompt)
+        self.assertNotIn("Package-surface product image logo consistency hard constraint", disabled_prompt)
 
     def test_certificate_prompt_starts_with_hard_large_product_mode_for_vehicle_like_names(self):
         prompt = _prompt_for(
@@ -305,11 +381,18 @@ class RealImagePipelinePromptTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("certificate about half the previous foreground visual size", prompt)
-        self.assertIn("place the certificate on top of the large product", prompt)
+        self.assertIn("certificate about half previous size", prompt)
+        self.assertIn("Fixed large-product top placement", prompt)
+        self.assertIn("rest naturally on top of the visible large-product surface", prompt)
+        self.assertIn("fixed on the product top", prompt)
+        self.assertIn("do not place the certificate beside the product", prompt)
+        self.assertIn("Spatial and gravity logic hard constraint", prompt)
+        self.assertIn("must physically conform to the support plane of the visible product surface", prompt)
+        self.assertIn("no impossible tilt", prompt)
+        self.assertIn("no angle that severely conflicts with real placement", prompt)
         self.assertIn("show about one third of the large product", prompt)
-        self.assertIn("camera about 0.5 meters from the product, 1.7 meters high, tilted downward about 30 degrees", prompt)
-        self.assertIn("The certificate reference image is the highest-priority certificate-card style reference", prompt)
+        self.assertIn("Use close phone camera about 0.5m away, 1.7m high, tilted down 30 degrees", prompt)
+        self.assertIn("The exact six-row field whitelist has priority over the certificate reference", prompt)
 
     def test_certificate_prompt_keeps_full_visibility_for_small_products(self):
         prompt = _prompt_for(
@@ -343,6 +426,134 @@ class RealImagePipelinePromptTests(unittest.TestCase):
                 self.assertIn("not a 3D render", prompt)
                 self.assertIn("preserve existing physical markings", prompt)
 
+    def test_main_certificate_and_package_prompts_assign_distinct_camera_profiles(self):
+        product = {
+            "name": "Zhifeng thermos cup",
+            "brand": "Zhifeng",
+            "model": "ZF-CUP-800",
+            "category": "drinkware",
+        }
+
+        main_prompt = _prompt_for("main", product)
+        certificate_prompt = _prompt_for("certificate", product)
+        package_prompt = _prompt_for("package", product)
+
+        self.assertIn("Main image camera profile", main_prompt)
+        self.assertIn("straight-on front view", main_prompt)
+        self.assertIn("camera level with the product", main_prompt)
+        self.assertIn("Certificate camera profile", certificate_prompt)
+        self.assertIn("above and diagonally offset from the product", certificate_prompt)
+        self.assertIn("angled downward at 45 degrees", certificate_prompt)
+        self.assertIn("Package co-photo camera profile", package_prompt)
+        self.assertIn("left-side product view", package_prompt)
+        self.assertIn("product's own left side", package_prompt)
+
+        for prompt in (main_prompt, certificate_prompt, package_prompt):
+            with self.subTest(prompt=prompt[:80]):
+                self.assertIn("product identity", prompt)
+                self.assertIn("output-specific camera profile controls viewpoint", prompt)
+                self.assertIn("Do not invent details on hidden surfaces", prompt)
+
+    def test_main_front_view_applies_to_all_product_volume_and_logo_modes(self):
+        product = {"name": "Test product", "brand": "Brand", "model": "MODEL-1"}
+        for volume in (None, "small", "large", "car"):
+            for logo_enabled in (False, True):
+                with self.subTest(volume=volume, logo_enabled=logo_enabled):
+                    project = {"style_config": {"product_logo_enabled": logo_enabled}}
+                    if volume:
+                        project["certificate_config"] = {"product_volume": volume}
+                    prompt = _prompt_for("main", product, project)
+                    self.assertIn("straight-on front view", prompt)
+                    self.assertIn("front face parallel to the image plane", prompt)
+                    self.assertIn("camera level with the product", prompt)
+                    self.assertIn("no downward tilt", prompt)
+                    self.assertNotIn("front-left three-quarter product view", prompt)
+                    self.assertNotIn("10 to 20 degrees", prompt)
+
+    def test_small_certificate_45_degree_view_keeps_identity_and_natural_logo_occlusion(self):
+        # Explicit small mode must override a name that would otherwise select large mode.
+        product = {"name": "手推式扫雪机", "category": "大型清洁机械"}
+        for has_reference in (False, True):
+            with self.subTest(has_reference=has_reference):
+                prompt = _prompt_for("certificate", product, {
+                    "certificate_config": {"product_volume": "small"},
+                    "has_certificate_reference": has_reference,
+                })
+                self.assertIn("phone-style 45-degree oblique high-angle snapshot", prompt)
+                self.assertIn("angled downward at 45 degrees to the horizontal support plane", prompt)
+                self.assertIn("Keep the entire certificate face readable", prompt)
+                self.assertIn("same product part; same side or panel", prompt)
+                self.assertIn("Logo visibility follows the assigned view", prompt)
+                self.assertIn("do not relocate it to make it visible", prompt)
+                self.assertIn("do not mechanically force every product to stand upright", prompt)
+                for obsolete in ("50 to 55 degrees", "slightly in front-right", "not a full top-down flat-lay", "mirror, duplicate, omit", "lower front-left"):
+                    self.assertNotIn(obsolete, prompt)
+                for obsolete in ("90 degrees", "directly overhead snapshot", "directly above the product", "true top-down view"):
+                    self.assertNotIn(obsolete, prompt)
+
+    def test_package_left_view_applies_to_product_not_carton_or_layout(self):
+        product = {"name": "保温杯", "category": "杯"}
+        for has_reference in (False, True):
+            with self.subTest(has_reference=has_reference):
+                prompt = _prompt_for("package", product, {
+                    "certificate_config": {"product_volume": "small"},
+                    "has_package_reference": has_reference,
+                })
+                self.assertIn("left-side product view", prompt)
+                self.assertIn("product's own left side", prompt)
+                self.assertIn("front established in the main image", prompt)
+                self.assertIn("not moving the product to the left of the frame", prompt)
+                self.assertIn("Do not mirror the product", prompt)
+                self.assertIn("The carton is not constrained to a left view", prompt)
+                self.assertIn("package information side panel and barcode clearly visible", prompt)
+                self.assertIn("right-side tabletop when physically possible", prompt)
+                self.assertIn("physically natural resting pose", prompt)
+                self.assertIn("do not relocate it to make it visible", prompt)
+                for obsolete in ("side opposite the main image", "25 to 35 degrees", "lower front-left", "higher front-right"):
+                    self.assertNotIn(obsolete, prompt)
+
+    def test_package_left_view_requires_information_physically_printed_on_carton(self):
+        product = {"name": "保温杯", "brand": "智枫", "model": "ZF-800", "category": "杯"}
+        for has_reference in (False, True):
+            for address in ("", "浙江省杭州市智枫路88号"):
+                with self.subTest(has_reference=has_reference, address=address):
+                    prompt = _prompt_for("package", product, {
+                        "certificate_config": {"product_volume": "small"},
+                        "package_config": {"manufacturer_address": address},
+                        "has_package_reference": has_reference,
+                        "barcode_type": "EAN_13",
+                        "barcode_value": "6903244675147",
+                    })
+                    self.assertIn("left-side product view", prompt)
+                    self.assertIn("Package co-photo print anchoring hard constraint", prompt)
+                    self.assertIn("every product-information row and the entire barcode, including its digits and quiet zones", prompt)
+                    self.assertIn("inside the boundary of a real visible carton side panel", prompt)
+                    self.assertIn("share that panel's perspective, foreshortening, material texture, lighting, and surface shading", prompt)
+                    self.assertIn("no gap or independent shadow between ink and carton", prompt)
+                    self.assertIn("Never move information into the white background or onto the tabletop, into mid-air", prompt)
+                    self.assertIn("a floating card, a separate information board, or a screen-facing overlay", prompt)
+                    self.assertIn("rotate or enlarge the carton and re-layout within that same physical panel", prompt)
+                    self.assertIn("keep the product's left-side view and never detach the text or barcode from the carton", prompt)
+                    self.assertIn("barcode digits: 6903244675147", prompt)
+
+    def test_large_and_vehicle_certificate_keep_oblique_camera_and_placement(self):
+        product = {"name": "Test product", "model": "MODEL-1"}
+        for volume, placement in (("large", "Fixed large-product top placement"), ("car", "Fixed vehicle-seat certificate placement")):
+            for has_reference in (False, True):
+                with self.subTest(volume=volume, has_reference=has_reference):
+                    prompt = _prompt_for("certificate", product, {
+                        "certificate_config": {"product_volume": volume},
+                        "has_certificate_reference": has_reference,
+                    })
+                    self.assertIn("phone-style angled top-down snapshot", prompt)
+                    self.assertIn("close front-right phone snapshot, 30° down", prompt)
+                    self.assertIn("show about one third of the large product", prompt)
+                    self.assertIn(placement, prompt)
+                    self.assertNotIn("90 degrees", prompt)
+                    self.assertNotIn("45 degrees", prompt)
+                    self.assertNotIn("45-degree oblique high-angle", prompt)
+                    self.assertNotIn("opposite main front-left", prompt)
+
     def test_package_and_certificate_prompts_match_reference_layouts(self):
         product = {
             "name": "impact wrench",
@@ -368,7 +579,7 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("no tabletop contact shadow", certificate_prompt)
         self.assertIn("Small products should remain fully visible", certificate_prompt)
         self.assertIn("Small-product certificate composition is active", certificate_prompt)
-        self.assertIn("50 to 55 degrees", certificate_prompt)
+        self.assertIn("angled downward at 45 degrees", certificate_prompt)
         self.assertIn("28 to 35 mm phone wide-angle", certificate_prompt)
         self.assertIn("horizontal plane", certificate_prompt)
         self.assertIn("certificate position is flexible", certificate_prompt)
@@ -434,7 +645,7 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("do not add floor shadows", prompt)
         self.assertNotIn("prefer a pure-white no-shadow result", prompt)
         self.assertIn("no horizon line", prompt)
-        self.assertIn("50 to 55 degrees", prompt)
+        self.assertIn("angled downward at 45 degrees", prompt)
         self.assertIn("Directly generate both the product and the certificate in one natural photo", prompt)
         self.assertIn("The certificate, its printed rows, its barcode, and its quality inspection stamp must be generated by the image model as part of the same camera shot", prompt)
         self.assertIn("no props, no desk accessories, no plants", prompt)
@@ -451,8 +662,8 @@ class RealImagePipelinePromptTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("phone-style angled top-down snapshot", prompt)
-        self.assertIn("camera above and slightly in front-left", prompt)
+        self.assertIn("phone-style 45-degree oblique high-angle snapshot", prompt)
+        self.assertIn("camera above and diagonally offset from the product", prompt)
         self.assertIn("Composition priority: readable certificate first", prompt)
         self.assertIn("Small products should remain fully visible when possible", prompt)
         self.assertIn("Small-product certificate composition is active", prompt)
@@ -505,7 +716,8 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("pure white background", prompt)
         self.assertIn("no tabletop contact shadow", prompt)
         self.assertIn("not a floating overlay", prompt)
-        self.assertIn("not a full top-down flat-lay and not a straight front view", prompt)
+        self.assertIn("45-degree oblique high-angle view", prompt)
+        self.assertNotIn("not a full top-down flat-lay", prompt)
         self.assertIn("not commercial studio product advertising", prompt)
         self.assertIn("readability has priority over making the certificate tiny", prompt)
         self.assertIn("one barcode using the entered barcode type and digits", prompt)
@@ -857,7 +1069,10 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         certificate_prompt = _prompt_for(
             "certificate",
             {"name": "厚抹生乳茶", "brand": "别样泡泡", "model": "500ml"},
-            {"has_certificate_reference": True},
+            {
+                "has_certificate_reference": True,
+                "certificate_config": {"manufacturer_address": "浙江省杭州市西湖区智枫路88号"},
+            },
         )
         package_prompt = _prompt_for(
             "package",
@@ -1105,6 +1320,8 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertEqual(second_pass_paths, [main_output, logo])
         self.assertIn("Mandatory product-surface logo second pass", second_pass_prompt)
         self.assertIn("Edit the generated main product image", second_pass_prompt)
+        self.assertIn("camera angle", second_pass_prompt)
+        self.assertIn("straight-on front view", main_prompt)
         self.assertIn("about 5% of the total visible product area", second_pass_prompt)
         self.assertIn("Do not add, move, remove, crop, or change the top-left brand-corner logo", second_pass_prompt)
 
@@ -1138,6 +1355,11 @@ class RealImagePipelinePromptTests(unittest.TestCase):
 
             main_output = Path(tmp) / "job" / "main.png"
             self.assertTrue(main_output.exists())
+            self.assertEqual(len(calls), 8)
+            self.assertIn("straight-on front view", calls[0][0])
+            self.assertIn("angled downward at 45 degrees", calls[1][0])
+            self.assertIn("left-side product view", calls[2][0])
+            self.assertIn("Package co-photo print anchoring hard constraint", calls[2][0])
             self.assertEqual(calls[0][1], [source])
             self.assertEqual(calls[1][1][0], main_output)
             self.assertEqual(calls[2][1][0], main_output)
@@ -1172,6 +1394,41 @@ class RealImagePipelinePromptTests(unittest.TestCase):
                 self.assertIn("Main-product reference hard constraint", prompt)
                 self.assertIn("product-surface logo must match the generated main product image", prompt)
                 self.assertIn("Do not keep only a similar logo while changing the product body", prompt)
+
+    def test_certificate_prompt_requires_main_product_logo_position_consistency(self):
+        product = {
+            "name": "文件柜",
+            "brand": "智枫",
+            "model": "ZF-CAB-01",
+            "category": "办公家具",
+        }
+
+        prompt = _prompt_for("certificate", product, {"barcode_type": "EAN_13", "barcode_value": "6903244675147"})
+
+        self.assertIn("Certificate co-photo product identity hard constraint", prompt)
+        self.assertIn("special priority on product-surface logo position", prompt)
+        self.assertIn("same product part", prompt)
+        self.assertIn("same side or panel", prompt)
+        self.assertIn("same relative height", prompt)
+        self.assertIn("Do not move the logo to another door, panel, corner, handle area, label zone, package, certificate, background, or image corner", prompt)
+
+    def test_large_product_certificate_prompt_allows_logo_absent_when_cropped_out(self):
+        prompt = _prompt_for(
+            "certificate",
+            {"name": "手推式扫雪机", "brand": "星锐月恒", "model": "6.5马力", "category": "大型清洁机械"},
+            {"certificate_config": {"product_volume": "large"}, "barcode_type": "EAN_13", "barcode_value": "6979051758366"},
+        )
+
+        self.assertIn("cropped large-product part must match main image", prompt)
+        self.assertIn("product-surface logo may be absent when crop excludes the logo area", prompt)
+        self.assertIn("If logo area is visible", prompt)
+        self.assertIn("Do not split, disassemble, bend, melt, stretch, squeeze, warp, break, duplicate, or deform the cropped product body", prompt)
+        self.assertIn("naturally co-photographed with the product part", prompt)
+        self.assertIn("cover key parts", prompt)
+        self.assertIn("Keep original geometry and scale relationships", prompt)
+        self.assertIn("panels, wheels, handles", prompt)
+        self.assertNotIn("special priority on product-surface logo position", prompt)
+        self.assertNotIn("Do not move the logo to another door, panel, corner, handle area, label zone", prompt)
 
     def test_certificate_generation_does_not_add_backend_qc_stamp_after_model_image(self):
         class FakeProvider:
@@ -1505,7 +1762,7 @@ class RealImagePipelinePromptTests(unittest.TestCase):
                 self.assertIn("main subject of each scene should be the realistic place", prompt)
                 self.assertIn("Product absence hard constraint", prompt)
                 self.assertIn("Do not render the product itself in usage-scene panels", prompt)
-                self.assertIn("show only the realistic environment where the product could reasonably be used", prompt)
+                self.assertIn("show only its realistic use environment", prompt)
                 self.assertIn("Usage scenes are environment-context images, not product display images", prompt)
                 self.assertIn("Do not center, enlarge, or hero-render the product", prompt)
                 self.assertIn("使用场景图以真实使用环境为主", prompt)
@@ -1535,10 +1792,11 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         for prompt in prompts[1:3]:
             with self.subTest(prompt=prompt):
                 self.assertIn("Detail usage-scene hard constraints", prompt)
-                self.assertIn("product-fit, complete four-scene uniqueness, identical caption style, and different caption text are mandatory", prompt)
+                self.assertIn("product-fit, complete four-scene uniqueness, required caption text, and globally consistent caption style are mandatory", prompt)
                 self.assertIn("Usage-scene fit hard constraint", prompt)
                 self.assertIn("Four-scene uniqueness hard constraint", prompt)
                 self.assertIn("Caption style hard constraint", prompt)
+                self.assertIn("Caption text hard constraint", prompt)
 
     def test_detail_usage_scene_prompts_limit_shared_elements_to_ten_percent(self):
         prompts = _detail_module_prompts(
@@ -1642,6 +1900,13 @@ class RealImagePipelinePromptTests(unittest.TestCase):
             "Scene 1-4 captions must use identical font style, size, weight, color, placement, label shape, spacing, and short Chinese wording",
             first_style,
         )
+        self.assertIn("Caption text hard constraint", first_style)
+        self.assertIn("Render visible Chinese caption text in all four scenes", first_style)
+        self.assertIn("Caption style may be plain text with no label box", first_style)
+        self.assertIn("font size, caption background color, and caption font color must be identical across Scene 1-4", first_style)
+        self.assertIn("Do not mix boxed, unboxed, styled, and plain captions", first_style)
+        self.assertNotIn("render no captions", first_style)
+        self.assertNotIn("captionless", first_style)
         self.assertIn("bottom-left of each scene panel", first_style)
         self.assertIn("semi-transparent charcoal black rgba(20,20,20,0.68)", first_style)
         self.assertIn("text color pure white #FFFFFF", first_style)
@@ -1694,6 +1959,7 @@ class RealImagePipelinePromptTests(unittest.TestCase):
                 self.assertIn("Use one identical caption block template for all four captions", prompt)
                 self.assertIn("same background or label box, opacity, padding, alignment, line height, and corner radius", prompt)
                 self.assertIn("Every scene-name label must be different", prompt)
+                self.assertIn("If using plain text with no label box, all four scenes must use the same plain text treatment", prompt)
 
     def test_detail_usage_scene_caption_style_is_a_hard_constraint(self):
         prompts = _detail_module_prompts(
@@ -1801,6 +2067,134 @@ class RealImagePipelinePromptTests(unittest.TestCase):
                 self.assertIn("Do not invent a different bottom, underside, lid, cap, base, anti-slip pad, connector, label, badge, logo placement, surface pattern, display stand, support pole, base, hanger, rack, mannequin, or non-product support hardware", prompt)
                 self.assertIn("If a part of the product is not visible in the uploaded reference, infer only a physically plausible continuation without adding readable logos, brand marks, labels, icons, decorative rings, or new surface features", prompt)
 
+    def test_missing_manufacturer_address_is_omitted_without_blank_template_rows(self):
+        product = {"name": "智枫保温杯", "brand": "智枫", "model": "ZF-CUP-800"}
+        for address_config in ({}, {"manufacturer_address": None}, {"manufacturer_address": ""}, {"manufacturer_address": " \t\n "}):
+            for has_reference in (False, True):
+                with self.subTest(address_config=address_config, has_reference=has_reference):
+                    project = {
+                        "barcode_type": "EAN_13",
+                        "barcode_value": "4006381333931",
+                        "certificate_config": {"manufacturer_name": "智枫科技", **address_config},
+                        "package_config": {"manufacturer_name": "智枫科技", **address_config},
+                        "has_certificate_reference": has_reference,
+                        "has_package_reference": has_reference,
+                    }
+                    certificate_prompt = _prompt_for("certificate", product, project)
+                    package_prompt = _prompt_for("package", product, project)
+                    self.assertNotIn("factory address:", certificate_prompt)
+                    self.assertIn("rows 品牌, 名称, 规格型号, 生产日期, 生产厂家, 检验员;", certificate_prompt)
+                    self.assertNotIn("地址：", package_prompt)
+                    self.assertNotIn("address:", package_prompt)
+                    for prompt in (certificate_prompt, package_prompt):
+                        self.assertIn("no blank rows", prompt)
+                    self.assertEqual(
+                        [label for label, _value in _certificate_rows(product, project)],
+                        ["品牌", "名称", "规格型号", "生产日期", "生产厂家"],
+                    )
+
+    def test_certificate_without_address_overrides_reference_row_layout_for_all_product_sizes(self):
+        product = {"name": "测试商品", "brand": "智枫", "model": "ZF-01"}
+        for product_volume in ("small", "large", "car"):
+            with self.subTest(product_volume=product_volume):
+                config = {"product_volume": product_volume, "manufacturer_name": "智枫科技"}
+                prompt = _prompt_for(
+                    "certificate", product,
+                    {"certificate_config": config, "has_certificate_reference": True},
+                )
+                self.assertFalse(
+                    "while replacing only the readable product data" in prompt,
+                    "Missing-address certificates must allow removing the reference template's address row.",
+                )
+                self.assertFalse("card proportions, field spacing" in prompt)
+                self.assertIn("rows 品牌, 名称, 规格型号, 生产日期, 生产厂家, 检验员;", prompt)
+                self.assertTrue("禁止印出“厂址”" in prompt, "The omitted label must be explicitly forbidden.")
+                self.assertTrue("生产厂家之后直接排检验员" in prompt, "The omitted row must not reserve space.")
+                whitelist = "Certificate field whitelist (6 rows): 品牌, 名称, 规格型号, 生产日期, 生产厂家, 检验员."
+                self.assertIn(whitelist, prompt)
+                self.assertLess(
+                    prompt.index(whitelist), prompt.index("Create one realistic"),
+                    "The six-row layout must precede the composition and reference instructions.",
+                )
+                self.assertNotIn("highest-priority certificate-card style reference", prompt)
+                self.assertIn("仅六行，不得出现第七行", prompt)
+
+                filled_prompt = _prompt_for(
+                    "certificate", product,
+                    {
+                        "certificate_config": {**config, "manufacturer_address": "浙江省杭州市智枫路88号"},
+                        "has_certificate_reference": True,
+                    },
+                )
+                self.assertIn("while replacing only the readable product data", filled_prompt)
+                self.assertIn("生产厂家, 厂址, 检验员;", filled_prompt)
+                self.assertNotIn("禁止印出“厂址”", filled_prompt)
+
+    def test_empty_certificate_address_does_not_restore_legacy_or_package_address(self):
+        product = {"name": "测试商品", "brand": "智枫", "model": "ZF-01"}
+        for address in (None, "", " \t\n "):
+            with self.subTest(address=address):
+                project = {
+                    "certificate_config": {"manufacturer_address": address, "address": "旧字段地址"},
+                    "package_config": {"manufacturer_address": "包装箱地址"},
+                    "has_certificate_reference": True,
+                }
+                prompt = _prompt_for("certificate", product, project)
+                self.assertNotIn("factory address:", prompt)
+                self.assertNotIn("旧字段地址", prompt)
+                self.assertNotIn("包装箱地址", prompt)
+                self.assertNotIn("厂址", [label for label, _value in _certificate_rows(product, project)])
+
+    def test_missing_certificate_address_does_not_inherit_package_address(self):
+        product = {"name": "测试商品", "brand": "智枫", "model": "ZF-01"}
+        project = {"package_config": {"manufacturer_address": "仅用于包装箱的地址"}}
+        prompt = _prompt_for("certificate", product, project)
+        self.assertNotIn("factory address:", prompt)
+        self.assertNotIn("仅用于包装箱的地址", prompt)
+        self.assertIn("rows 品牌, 名称, 规格型号, 生产日期, 生产厂家, 检验员;", prompt)
+        self.assertIn("仅用于包装箱的地址", _prompt_for("package", product, project))
+
+    def test_certificate_template_keeps_entered_and_legacy_manufacturer_addresses(self):
+        for field_name in ("manufacturer_address", "address"):
+            with self.subTest(field_name=field_name):
+                rows = _certificate_rows(
+                    {"name": "智枫保温杯", "brand": "智枫", "model": "ZF-CUP-800"},
+                    {"certificate_config": {field_name: "浙江省杭州市西湖区智枫路88号"}},
+                )
+                self.assertEqual(rows[-1], ("厂址", "浙江省杭州市西湖区智枫路88号"))
+                self.assertEqual(len(rows), 6)
+                prompt = _prompt_for(
+                    "certificate", {"name": "测试商品"},
+                    {"certificate_config": {field_name: "浙江省杭州市西湖区智枫路88号"}},
+                )
+                self.assertIn("factory address: 浙江省杭州市西湖区智枫路88号;", prompt)
+                self.assertIn("生产厂家, 厂址, 检验员;", prompt)
+
+    def test_package_template_omits_whitespace_address_label(self):
+        captured_text: list[str] = []
+        original_text = ImageDraw.ImageDraw.text
+
+        def capture_text(draw, xy, text, *args, **kwargs):
+            captured_text.append(str(text))
+            return original_text(draw, xy, text, *args, **kwargs)
+
+        ImageDraw.ImageDraw.text = capture_text
+        try:
+            _compose_package_label(
+                Image.new("RGB", (800, 800), "white"),
+                {"name": "智枫保温杯", "brand": "智枫", "model": "ZF-CUP-800"},
+                {
+                    "barcode_type": "EAN_13",
+                    "barcode_value": "4006381333931",
+                    "package_config": {"manufacturer_name": "智枫科技", "manufacturer_address": " \t\n "},
+                },
+                "C:/Windows/Fonts/msyh.ttc",
+            )
+        finally:
+            ImageDraw.ImageDraw.text = original_text
+        self.assertFalse(any(text.startswith("地址:") for text in captured_text))
+        self.assertIn("生产厂家: 智枫科技", captured_text)
+
     def test_certificate_template_is_smaller_and_contains_required_fields(self):
         product = {
             "name": "智枫保温杯",
@@ -1819,7 +2213,7 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         }
 
         rows = _certificate_rows(product, project)
-        self.assertEqual([label for label, _value in rows], ["品牌", "名称", "规格型号", "生产日期", "生产厂家", "厂址"])
+        self.assertEqual([label for label, _value in rows], ["品牌", "名称", "规格型号", "生产日期", "生产厂家"])
 
         image = Image.new("RGB", (800, 800), "white")
         _compose_certificate(image, product, project, "C:/Windows/Fonts/msyh.ttc")
@@ -2191,8 +2585,11 @@ class RealImagePipelinePromptTests(unittest.TestCase):
         self.assertIn("specification model: ZF-CUP-800", prompt)
         self.assertIn("manufacturer: 智枫科技", prompt)
         self.assertIn("address: 浙江省杭州市西湖区智枫路88号", prompt)
-        self.assertIn("barcode type: EAN_13", prompt)
         self.assertIn("barcode digits: 4006381333931", prompt)
+        self.assertNotIn("barcode type: EAN_13", prompt)
+        self.assertIn("Package surface hard constraint: never print barcode symbology names or parameter-field labels", prompt)
+        self.assertIn("EAN-13, EAN_13, 条形码制式, barcode type, barcode format, or barcode standard", prompt)
+        self.assertIn("The barcode symbology is drawing metadata only, not visible package text", prompt)
         self.assertNotIn("品牌：智枫", prompt)
         self.assertIn("品名：智枫保温杯", prompt)
         self.assertIn("规格型号：ZF-CUP-800", prompt)
@@ -2432,7 +2829,7 @@ class RealImagePipelinePromptTests(unittest.TestCase):
 
         image = _build_detail_page(sources, product, project, "C:/Windows/Fonts/msyh.ttc")
 
-        self.assertEqual(image.size, (800, 2700))
+        self.assertEqual(image.size, (800, 3200))
         self.assertEqual(image.getpixel((400, 250)), (255, 255, 255))
         self.assertEqual(image.getpixel((400, 850)), (255, 0, 0))
         self.assertEqual(image.getpixel((400, 1650)), (0, 255, 0))
@@ -2497,6 +2894,48 @@ class RealImagePipelinePromptTests(unittest.TestCase):
             real_image._compose_package_label = original_compose
 
         self.assertEqual(calls, [])
+
+    def test_car_package_generation_uses_scene_prompt_without_package_reference_image(self):
+        class FakeProvider:
+            def __init__(self):
+                self.calls: list[tuple[str, list[Path]]] = []
+
+            def edit_image(self, *, prompt, size, image_paths):
+                self.calls.append((prompt, list(image_paths)))
+                image = Image.new("RGB", (1024, 1024), "#ffffff")
+                buffer = BytesIO()
+                image.save(buffer, format="PNG")
+                return buffer.getvalue()
+
+        provider = FakeProvider()
+        pipeline = KeleFiveImagePipeline(provider, font_path="C:/Windows/Fonts/msyh.ttc")
+        product = {"name": "智枫产品", "brand": "智枫", "model": "ZF-CAR-01", "category": "通用商品"}
+        project = {
+            "certificate_config": {"product_volume": "car"},
+            "barcode_type": "EAN_13",
+            "barcode_value": "6903244675147",
+        }
+
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.png"
+            package_reference = Path(tmp) / "package-reference.png"
+            Image.new("RGB", (800, 800), "white").save(source)
+            Image.new("RGB", (800, 800), "white").save(package_reference)
+
+            pipeline.generate_five_images(
+                output_dir=Path(tmp),
+                job_id="job",
+                product=product,
+                project=project,
+                source_image_path=source,
+                reference_image_paths={"package": package_reference},
+            )
+
+        package_prompt, package_image_paths = provider.calls[2]
+        self.assertIn("Show a realistic product-in-use scene", package_prompt)
+        self.assertNotIn("Large-product package-only mode is active", package_prompt)
+        self.assertEqual(len(package_image_paths), 1)
+        self.assertNotIn(package_reference, package_image_paths)
 
     def test_detail_output_requests_separate_visual_modules_before_stitching(self):
         class FakeProvider:

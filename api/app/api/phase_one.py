@@ -15,15 +15,17 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.providers.mock_image import MockImageProvider
+from app.providers.detail_brain import DetailBrainConfig, OpenAIDetailBrain
+from app.providers.detail_scenes import normalize_scene_inputs
 from app.providers.kele import KeleConfig, KeleGptImage2Provider
 from app.providers.real_image import OUTPUT_SPECS, KeleFiveImagePipeline
 from app.quality.certificate_scale import inspect_certificate_scale
 from app.rendering.barcode.validators import BarcodeType, validate_barcode_value
-from app.storage import AppStorage, json_dumps, json_loads, new_id, row_to_dict
+from app.storage import AppStorage, json_dumps, json_loads, new_id, output_folder_name, row_to_dict
 from app.core.billing import (
     InsufficientBalance,
     charge_generation_hold,
@@ -39,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 HTTP_422 = 422
 REFRESH_COOKIE_NAME = "zhifeng_refresh_token"
+PHONE_CODE_RATE_LIMIT_WINDOW_SECONDS = 180
 ALLOWED_ASSET_TYPES = {
     "product_original",
     "product_detail",
@@ -110,13 +113,30 @@ class RegisterPayload(RegistrationCodePayload):
 
 
 class LoginPayload(BaseModel):
-    phone: str = Field(min_length=6, max_length=32)
+    phone: str | None = Field(default=None, min_length=6, max_length=32)
+    username: str | None = Field(default=None, min_length=1, max_length=60)
     password: str = Field(min_length=8, max_length=128)
 
     @field_validator("phone")
     @classmethod
-    def validate_phone(cls, value: str) -> str:
+    def validate_phone(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         return RegistrationCodePayload.validate_phone(value)
+
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def require_login_identity(self) -> "LoginPayload":
+        if not self.phone and not self.username:
+            raise ValueError("phone or username is required")
+        return self
 
 
 class PasswordResetCodePayload(RegistrationCodePayload):
@@ -241,7 +261,9 @@ async def send_registration_code(
     runtime_services: Any = Depends(get_runtime_services),
 ) -> dict[str, Any]:
     phone_key = hashlib.sha256(payload.phone.encode("utf-8")).hexdigest()
-    if runtime_services.hit_rate_limit(f"rate:registration-code:{phone_key}", limit=5, window_seconds=3600):
+    if runtime_services.hit_rate_limit(
+        f"rate:registration-code:{phone_key}", limit=5, window_seconds=PHONE_CODE_RATE_LIMIT_WINDOW_SECONDS
+    ):
         raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "PHONE_CODE_RATE_LIMITED", "验证码请求过于频繁。")
     code = f"{secrets.randbelow(1_000_000):06d}"
     expires_minutes = registration_code_expire_minutes()
@@ -271,8 +293,8 @@ async def send_registration_code(
                     (new_id(), payload.phone, hash_registration_code(payload.phone, code), utc_after(minutes=expires_minutes)),
                 )
         send_registration_code_sms(payload.phone, code, expires_minutes=expires_minutes)
-    except SmsNotConfigured:
-        raise_error(status.HTTP_503_SERVICE_UNAVAILABLE, "SMS_NOT_CONFIGURED", "短信验证码服务尚未配置。")
+    except SmsNotConfigured as exc:
+        raise_sms_error(exc)
     except Exception as exc:
         if str(exc).startswith("LOCK_BUSY"):
             raise_error(status.HTTP_409_CONFLICT, "REGISTER_IN_PROGRESS", "该手机号正在处理注册请求。")
@@ -292,8 +314,10 @@ async def register(
     runtime_services: Any = Depends(get_runtime_services),
 ) -> dict[str, Any]:
     phone_key = hashlib.sha256(payload.phone.encode("utf-8")).hexdigest()
-    if runtime_services.hit_rate_limit(f"rate:register:{phone_key}", limit=5, window_seconds=3600):
-        raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "REGISTER_RATE_LIMITED", "娉ㄥ唽璇锋眰杩囦簬棰戠箒銆?")
+    if runtime_services.hit_rate_limit(
+        f"rate:register:{phone_key}", limit=5, window_seconds=PHONE_CODE_RATE_LIMIT_WINDOW_SECONDS
+    ):
+        raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "REGISTER_RATE_LIMITED", "注册请求过于频繁。")
     user_id = new_id()
     access_token = secrets.token_urlsafe(32)
     try:
@@ -323,6 +347,12 @@ async def register(
                 invitation = active_invitation_code(connection, payload.invitation_code)
                 if invitation is None:
                     raise_error(status.HTTP_400_BAD_REQUEST, "INVITATION_CODE_INVALID", "邀请码不存在或未启用。")
+                existing_username = connection.execute(
+                    "SELECT id FROM users WHERE lower(username) = lower(?)",
+                    (payload.username,),
+                ).fetchone()
+                if existing_username is not None:
+                    raise_error(status.HTTP_409_CONFLICT, "USERNAME_ALREADY_REGISTERED", "该用户名已经注册。")
                 email_value = payload.email or f"{payload.phone}@phone.local"
                 connection.execute(
                     """
@@ -398,22 +428,30 @@ async def login(
     storage: AppStorage = Depends(get_storage),
     runtime_services: Any = Depends(get_runtime_services),
 ) -> dict[str, Any]:
-    phone_key = hashlib.sha256(payload.phone.encode("utf-8")).hexdigest()
+    login_identity = payload.phone or payload.username or ""
+    login_key = hashlib.sha256(login_identity.lower().encode("utf-8")).hexdigest()
     client_ip = request.client.host if request.client else "unknown"
-    if runtime_services.hit_rate_limit(f"rate:login:phone:{phone_key}", limit=10, window_seconds=900):
-        raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "LOGIN_RATE_LIMITED", "鐧诲綍灏濊瘯杩囦簬棰戠箒銆?")
+    if runtime_services.hit_rate_limit(f"rate:login:identity:{login_key}", limit=10, window_seconds=900):
+        raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "LOGIN_RATE_LIMITED", "登录尝试过于频繁。")
     if runtime_services.hit_rate_limit(f"rate:login:ip:{client_ip}", limit=50, window_seconds=900):
-        raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "LOGIN_RATE_LIMITED", "鐧诲綍灏濊瘯杩囦簬棰戠箒銆?")
+        raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "LOGIN_RATE_LIMITED", "登录尝试过于频繁。")
     with storage.connect() as connection:
-        row = connection.execute(
-            "SELECT * FROM users WHERE phone_normalized = ? OR phone = ?",
-            (payload.phone, payload.phone),
-        ).fetchone()
+        if payload.phone:
+            row = connection.execute(
+                "SELECT * FROM users WHERE phone_normalized = ? OR phone = ?",
+                (payload.phone, payload.phone),
+            ).fetchone()
+        else:
+            username_rows = connection.execute(
+                "SELECT * FROM users WHERE lower(username) = lower(?) LIMIT 2",
+                (payload.username,),
+            ).fetchall()
+            row = username_rows[0] if len(username_rows) == 1 else None
         user = row_to_dict(row)
         if user is None or not verify_password(payload.password, user["password_hash"]):
-            raise_error(status.HTTP_401_UNAUTHORIZED, "INVALID_CREDENTIALS", "手机号或密码错误。")
-        if user.get("status") != "active" or not user.get("phone_verified_at"):
-            raise_error(status.HTTP_403_FORBIDDEN, "PHONE_NOT_VERIFIED", "手机号验证后才能登录。")
+            raise_error(status.HTTP_401_UNAUTHORIZED, "INVALID_CREDENTIALS", "账号或密码错误。")
+        if user.get("status") != "active":
+            raise_error(status.HTTP_403_FORBIDDEN, "ACCOUNT_INACTIVE", "账号状态不可用。")
         token = create_access_session(connection, user_id=user["id"])
         refresh_token = create_refresh_session(connection, user_id=user["id"], request=request)
     set_refresh_cookie(response, refresh_token)
@@ -427,8 +465,10 @@ async def send_password_reset_code(
     runtime_services: Any = Depends(get_runtime_services),
 ) -> dict[str, Any]:
     phone_key = hashlib.sha256(payload.phone.encode("utf-8")).hexdigest()
-    if runtime_services.hit_rate_limit(f"rate:password-reset-code:{phone_key}", limit=5, window_seconds=3600):
-        raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "PHONE_CODE_RATE_LIMITED", "Password reset code requested too often.")
+    if runtime_services.hit_rate_limit(
+        f"rate:password-reset-code:{phone_key}", limit=5, window_seconds=PHONE_CODE_RATE_LIMIT_WINDOW_SECONDS
+    ):
+        raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "PHONE_CODE_RATE_LIMITED", "验证码请求过于频繁。")
 
     code = f"{secrets.randbelow(1_000_000):06d}"
     expires_minutes = registration_code_expire_minutes()
@@ -463,8 +503,8 @@ async def send_password_reset_code(
                     ),
                 )
         send_registration_code_sms(payload.phone, code, expires_minutes=expires_minutes, purpose="password_reset")
-    except SmsNotConfigured:
-        raise_error(status.HTTP_503_SERVICE_UNAVAILABLE, "SMS_NOT_CONFIGURED", "SMS service is not configured.")
+    except SmsNotConfigured as exc:
+        raise_sms_error(exc)
     except Exception as exc:
         if str(exc).startswith("LOCK_BUSY"):
             raise_error(status.HTTP_409_CONFLICT, "PASSWORD_RESET_IN_PROGRESS", "Password reset is already in progress.")
@@ -789,6 +829,16 @@ async def create_project(
     if product is None:
         raise_access_denied()
 
+    detail_config = dict(payload.detail_config)
+    try:
+        scene_inputs = normalize_scene_inputs(detail_config.get("scene_inputs", {}))
+    except ValueError:
+        raise_error(HTTP_422, "DETAIL_SCENE_INPUT_INVALID", "请检查场景内容，每项最多500字。")
+    if scene_inputs:
+        detail_config["scene_inputs"] = scene_inputs
+    else:
+        detail_config.pop("scene_inputs", None)
+
     barcode = validate_barcode_value(payload.barcode.barcode_type, payload.barcode.raw_value)
     if not payload.barcode.confirmed or not barcode.can_confirm:
         raise_error(HTTP_422, "BARCODE_NOT_CONFIRMED", "鏉″舰鐮佸皻鏈‘璁ゃ€?")
@@ -810,7 +860,7 @@ async def create_project(
                 json_dumps(payload.style_config),
                 json_dumps(payload.certificate_config),
                 json_dumps(payload.package_config),
-                json_dumps(payload.detail_config),
+                json_dumps(detail_config),
                 payload.barcode.barcode_type.value,
                 barcode.normalized_value,
             ),
@@ -904,6 +954,14 @@ async def generate_project(
         if str(exc).startswith("SLOT_BUSY"):
             raise_error(status.HTTP_429_TOO_MANY_REQUESTS, "ACTIVE_JOB_LIMIT_REACHED", "褰撳墠璐﹀彿鐢熸垚浠诲姟杩囧锛岃绋嶅悗鍐嶈瘯銆?")
         raise
+
+
+@router.get("/generation-jobs/active")
+async def list_active_generation_jobs(
+    user: dict[str, Any] = Depends(current_user),
+    storage: AppStorage = Depends(get_storage),
+) -> dict[str, Any]:
+    return {"items": active_generation_jobs(storage, user["id"])}
 
 
 @router.get("/generation-jobs/{job_id}")
@@ -1165,6 +1223,20 @@ def active_generation_job_count(storage: AppStorage, user_id: str) -> int:
     return int(row["count"] if row is not None else 0)
 
 
+def active_generation_jobs(storage: AppStorage, user_id: str) -> list[dict[str, Any]]:
+    with storage.connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT id
+            FROM generation_jobs
+            WHERE user_id = ? AND status IN ('queued', 'running')
+            ORDER BY created_at DESC, id DESC
+            """,
+            (user_id,),
+        ).fetchall()
+    return [get_job_payload(storage, row["id"], user_id) for row in rows]
+
+
 def queued_generation_job_count(storage: AppStorage) -> int:
     with storage.connect() as connection:
         row = connection.execute(
@@ -1206,6 +1278,7 @@ def create_queued_generation_job(
 ) -> dict[str, Any]:
     job_id = new_id()
     provider = build_image_generation_provider()
+    validate_generation_scene_configuration(provider, project_payload(project))
     try:
         reserve_generation_charge(storage, user=user, job_id=job_id)
     except InsufficientBalance as exc:
@@ -1272,6 +1345,7 @@ def execute_claimed_generation_job(*, job_id: str, storage: AppStorage, runtime_
     product_for_image = product_payload(product)
     project_for_image = project_payload(project)
     provider = build_image_generation_provider()
+    output_folder = generation_output_folder_name(context)
 
     try:
         with runtime_services.slot(
@@ -1281,7 +1355,7 @@ def execute_claimed_generation_job(*, job_id: str, storage: AppStorage, runtime_
         ):
             generated = provider.generate_five_images(
                 output_dir=storage.output_dir,
-                job_id=job_id,
+                job_id=output_folder,
                 product=product_for_image,
                 project=project_for_image,
                 source_image_path=Path(source_asset["file_path"]),
@@ -1298,6 +1372,7 @@ def execute_claimed_generation_job(*, job_id: str, storage: AppStorage, runtime_
                 connection,
                 output_dir=storage.output_dir,
                 job_id=job_id,
+                output_folder_name=output_folder,
                 user_id=user["id"],
                 project_id=project["id"],
                 source_asset_version_id=source_asset["version_id"],
@@ -1471,6 +1546,7 @@ def run_generation_job(
     product_for_image = product_payload(product)
     project_for_image = project_payload(project)
     provider = build_image_generation_provider()
+    validate_generation_scene_configuration(provider, project_for_image)
     try:
         reserve_generation_charge(storage, user=user, job_id=job_id)
     except InsufficientBalance as exc:
@@ -1489,6 +1565,12 @@ def run_generation_job(
             (job_id, user["id"], project_id, provider.name, source_asset["version_id"]),
         )
         connection.execute("UPDATE projects SET status = 'generating', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (project_id,))
+        job_row = row_to_dict(connection.execute("SELECT * FROM generation_jobs WHERE id = ?", (job_id,)).fetchone())
+    output_folder = output_folder_name(
+        username=user.get("username", ""),
+        job_id=job_id,
+        created_at=job_row.get("created_at") if job_row else None,
+    )
 
     try:
         with runtime_services.slot(
@@ -1503,7 +1585,7 @@ def run_generation_job(
                 )
             generated = provider.generate_five_images(
                 output_dir=storage.output_dir,
-                job_id=job_id,
+                job_id=output_folder,
                 product=product_for_image,
                 project=project_for_image,
                 source_image_path=Path(source_asset["file_path"]),
@@ -1527,6 +1609,7 @@ def run_generation_job(
                 connection,
                 output_dir=storage.output_dir,
                 job_id=job_id,
+                output_folder_name=output_folder,
                 user_id=user["id"],
                 project_id=project_id,
                 source_asset_version_id=source_asset["version_id"],
@@ -1918,16 +2001,26 @@ def record_existing_output_files(
     *,
     output_dir: Path,
     job_id: str,
+    output_folder_name: str | None = None,
     user_id: str,
     project_id: str,
     source_asset_version_id: str,
 ) -> None:
-    job_dir = output_dir / job_id
-    if not job_dir.exists():
+    folder_names = [name for name in (output_folder_name, job_id) if name]
+    job_dirs: list[Path] = []
+    seen: set[str] = set()
+    for folder_name in folder_names:
+        if folder_name in seen:
+            continue
+        seen.add(folder_name)
+        job_dir = output_dir / folder_name
+        if job_dir.exists():
+            job_dirs.append(job_dir)
+    if not job_dirs:
         return
     for output_type, _expected_width, _expected_height in OUTPUT_SPECS:
-        path = job_dir / f"{output_type}.png"
-        if not path.exists():
+        path = next((job_dir / f"{output_type}.png" for job_dir in job_dirs if (job_dir / f"{output_type}.png").exists()), None)
+        if path is None:
             continue
         try:
             with Image.open(path) as image:
@@ -1951,9 +2044,10 @@ def recover_existing_project_outputs(storage: AppStorage, *, project_id: str, us
     with storage.connect() as connection:
         jobs = connection.execute(
             """
-            SELECT id, source_asset_version_id
+            SELECT generation_jobs.id, generation_jobs.source_asset_version_id, generation_jobs.created_at, users.username
             FROM generation_jobs
-            WHERE project_id = ? AND user_id = ? AND source_asset_version_id IS NOT NULL
+            JOIN users ON users.id = generation_jobs.user_id
+            WHERE project_id = ? AND generation_jobs.user_id = ? AND source_asset_version_id IS NOT NULL
             """,
             (project_id, user_id),
         ).fetchall()
@@ -1962,6 +2056,11 @@ def recover_existing_project_outputs(storage: AppStorage, *, project_id: str, us
                 connection,
                 output_dir=storage.output_dir,
                 job_id=job["id"],
+                output_folder_name=output_folder_name(
+                    username=job["username"],
+                    job_id=job["id"],
+                    created_at=job["created_at"],
+                ),
                 user_id=user_id,
                 project_id=project_id,
                 source_asset_version_id=job["source_asset_version_id"],
@@ -2024,6 +2123,14 @@ def insert_generation_output(
     ensure_output_thumbnail(file_path)
 
 
+def generation_output_folder_name(context: dict[str, dict[str, Any]]) -> str:
+    return output_folder_name(
+        username=context["user"].get("username", ""),
+        job_id=context["job"]["id"],
+        created_at=context["job"].get("created_at"),
+    )
+
+
 def get_owned_row(storage: AppStorage, table: str, row_id: str, user_id: str) -> dict[str, Any] | None:
     allowed_tables = {"products", "projects", "generation_jobs", "generation_outputs", "assets", "asset_versions"}
     if table not in allowed_tables:
@@ -2031,6 +2138,16 @@ def get_owned_row(storage: AppStorage, table: str, row_id: str, user_id: str) ->
     with storage.connect() as connection:
         row = connection.execute(f"SELECT * FROM {table} WHERE id = ? AND user_id = ?", (row_id, user_id)).fetchone()
     return row_to_dict(row)
+
+
+def validate_generation_scene_configuration(provider: Any, project: dict[str, Any]) -> None:
+    if isinstance(provider, KeleFiveImagePipeline):
+        try:
+            provider.validate_detail_scene_configuration(project)
+        except RuntimeError as exc:
+            if str(exc).startswith("DETAIL_BRAIN_REQUIRED"):
+                raise_error(status.HTTP_503_SERVICE_UNAVAILABLE, "DETAIL_BRAIN_REQUIRED", "场景规划服务未启用。")
+            raise
 
 
 def build_image_generation_provider() -> Any:
@@ -2042,8 +2159,36 @@ def build_image_generation_provider() -> Any:
             KeleGptImage2Provider(load_kele_config()),
             font_path=os.getenv("CHINESE_FONT_PATH", ""),
             edit_size=os.getenv("KELE_IMAGE_SIZE", "1024x1024"),
+            detail_brain=build_detail_brain_provider(),
         )
     raise_error(status.HTTP_503_SERVICE_UNAVAILABLE, "IMAGE_PROVIDER_UNSUPPORTED", f"Unsupported IMAGE_PROVIDER: {provider_name}")
+
+
+def build_detail_brain_provider() -> Any | None:
+    provider_name = os.getenv("DETAIL_BRAIN_PROVIDER", "").strip().lower()
+    if not provider_name:
+        return None
+    if provider_name in {"openai", "gpt-5.5", "openai-gpt-5.5"}:
+        return OpenAIDetailBrain(load_detail_brain_config())
+    raise_error(status.HTTP_503_SERVICE_UNAVAILABLE, "DETAIL_BRAIN_PROVIDER_UNSUPPORTED", f"Unsupported DETAIL_BRAIN_PROVIDER: {provider_name}")
+
+
+def load_detail_brain_config() -> DetailBrainConfig:
+    extra_headers_raw = os.getenv("DETAIL_BRAIN_EXTRA_HEADERS_JSON", "{}") or "{}"
+    try:
+        extra_headers = json.loads(extra_headers_raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("DETAIL_BRAIN_EXTRA_HEADERS_JSON is not valid JSON") from exc
+    if not isinstance(extra_headers, dict):
+        raise RuntimeError("DETAIL_BRAIN_EXTRA_HEADERS_JSON must be a JSON object")
+    return DetailBrainConfig(
+        base_url=os.getenv("DETAIL_BRAIN_BASE_URL", "https://api.openai.com/v1"),
+        api_key=os.getenv("DETAIL_BRAIN_API_KEY") or os.getenv("OPENAI_API_KEY", ""),
+        model=os.getenv("DETAIL_BRAIN_MODEL", "gpt-5.5"),
+        reasoning_effort=os.getenv("DETAIL_BRAIN_REASONING_EFFORT", "medium"),
+        timeout_seconds=int(os.getenv("DETAIL_BRAIN_TIMEOUT_SECONDS", "150")),
+        extra_headers={str(key): str(value) for key, value in extra_headers.items()},
+    )
 
 
 def load_kele_config() -> KeleConfig:
@@ -2086,6 +2231,17 @@ def raise_access_denied() -> None:
 
 def raise_error(status_code: int, code: str, message: str) -> None:
     raise HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+def raise_sms_error(exc: SmsNotConfigured) -> None:
+    reason = str(exc) or "SMS_NOT_CONFIGURED"
+    if reason.startswith("SMS_TENCENT_FAILED") or reason == "SMS_TENCENT_INVALID_RESPONSE":
+        logger.warning("SMS provider failed: %s", reason)
+        raise_error(status.HTTP_502_BAD_GATEWAY, "SMS_PROVIDER_FAILED", f"短信服务发送失败：{reason}")
+    if reason in {"SMS_TENCENT_NOT_CONFIGURED", "SMS_NOT_CONFIGURED"}:
+        raise_error(status.HTTP_503_SERVICE_UNAVAILABLE, "SMS_NOT_CONFIGURED", "短信验证码服务尚未配置。")
+    logger.warning("SMS service unavailable: %s", reason)
+    raise_error(status.HTTP_503_SERVICE_UNAVAILABLE, reason, "短信服务不可用。")
 
 
 def _clip_error_message(message: str, limit: int = 2000) -> str:

@@ -46,6 +46,7 @@ class KeleGptImage2Provider:
         retry_sleep: RetrySleep = time.sleep,
         retry_base_delay_seconds: float = 5,
         max_attempts: int = 3,
+        policy_violation_max_attempts: int = 5,
     ):
         self.config = config
         self._client_factory = client_factory or _default_client_factory
@@ -53,25 +54,29 @@ class KeleGptImage2Provider:
         self._retry_sleep = retry_sleep
         self._retry_base_delay_seconds = retry_base_delay_seconds
         self._max_attempts = max(1, max_attempts)
+        self._policy_violation_max_attempts = max(self._max_attempts, policy_violation_max_attempts)
         self._openai_client: Any | None = None
 
     def edit_image(self, *, prompt: str, size: str, image_paths: list[Any]) -> bytes:
         self._validate_reference_images(image_paths)
         self._validate_config()
-        for attempt in range(1, self._max_attempts + 1):
+        max_attempts = self._policy_violation_max_attempts
+        for attempt in range(1, max_attempts + 1):
             try:
                 response = self._create_image(prompt=prompt, size=size, image_paths=image_paths)
                 return decode_image_response(response, self._url_fetcher, self.config.timeout_seconds)
             except Exception as exc:
                 error = _normalize_provider_exception(exc)
-                if attempt >= self._max_attempts or not _is_retryable_provider_error(str(error)):
+                attempt_limit = self._attempt_limit_for_error(error)
+                if attempt >= attempt_limit or not _is_retryable_provider_error(str(error)):
                     raise error from exc
                 self._retry_sleep(_retry_delay_seconds(error, self._retry_base_delay_seconds, attempt, exc))
         raise RuntimeError("KELE_RETRY_EXHAUSTED")
 
     def generate_image(self, *, prompt: str, size: str) -> bytes:
         self._validate_config()
-        for attempt in range(1, self._max_attempts + 1):
+        max_attempts = self._policy_violation_max_attempts
+        for attempt in range(1, max_attempts + 1):
             try:
                 response = self._get_client().images.generate(
                     model=self.config.model,
@@ -82,10 +87,16 @@ class KeleGptImage2Provider:
                 return decode_image_response(response, self._url_fetcher, self.config.timeout_seconds)
             except Exception as exc:
                 error = _normalize_provider_exception(exc)
-                if attempt >= self._max_attempts or not _is_retryable_provider_error(str(error)):
+                attempt_limit = self._attempt_limit_for_error(error)
+                if attempt >= attempt_limit or not _is_retryable_provider_error(str(error)):
                     raise error from exc
                 self._retry_sleep(_retry_delay_seconds(error, self._retry_base_delay_seconds, attempt, exc))
         raise RuntimeError("KELE_RETRY_EXHAUSTED")
+
+    def _attempt_limit_for_error(self, error: RuntimeError) -> int:
+        if _is_policy_violation_provider_error(str(error)):
+            return self._policy_violation_max_attempts
+        return self._max_attempts
 
     def _create_image(self, *, prompt: str, size: str, image_paths: list[Any]) -> Any:
         with ExitStack() as stack:
@@ -201,6 +212,7 @@ def _is_retryable_provider_error(message: str) -> bool:
         or message.startswith("KELE_RESULT_DOWNLOAD_HTTP_524")
         or message.startswith("KELE_RESULT_DOWNLOAD_NETWORK_ERROR")
         or message.startswith("KELE_RESULT_DOWNLOAD_TIMEOUT")
+        or _is_policy_violation_provider_error(message)
     )
 
 
@@ -239,6 +251,7 @@ def _response_retry_after_seconds(response: Any) -> float | None:
 def _normalize_provider_exception(exc: Exception) -> RuntimeError:
     if isinstance(exc, RuntimeError) and str(exc).startswith("KELE_"):
         return exc
+    message = str(exc)
     status_code = getattr(exc, "status_code", None)
     if isinstance(status_code, int):
         return RuntimeError(f"KELE_HTTP_{status_code}: {exc}")
@@ -250,9 +263,38 @@ def _normalize_provider_exception(exc: Exception) -> RuntimeError:
         return RuntimeError(f"KELE_RESULT_DOWNLOAD_NETWORK_ERROR: {exc}")
     if isinstance(exc, (TimeoutError, socket.timeout)):
         return RuntimeError(f"KELE_TIMEOUT: {exc}")
+    if _looks_like_provider_timeout_message(message):
+        return RuntimeError(f"KELE_TIMEOUT: {message}")
     if isinstance(exc, RuntimeError):
         return exc
     return RuntimeError(f"KELE_ERROR: {exc}")
+
+
+def _looks_like_provider_timeout_message(message: str) -> bool:
+    normalized = message.lower()
+    return "timed out" in normalized or "timeout" in normalized or "time out" in normalized
+
+
+def _is_policy_violation_provider_error(message: str) -> bool:
+    normalized = message.lower()
+    return any(
+        token in normalized
+        for token in (
+            "content_policy",
+            "policy_violation",
+            "safety system",
+            "moderation",
+            "blocked by safety",
+            "rejected as a result of our safety",
+            "sensitive content",
+            "unsafe content",
+            "审核",
+            "违规",
+            "敏感内容",
+            "安全策略",
+            "安全系统",
+        )
+    )
 
 
 def _looks_like_image(content: bytes) -> bool:

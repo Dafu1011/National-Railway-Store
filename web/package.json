@@ -1,6 +1,6 @@
 {
   "name": "huizhizuo-web",
-  "version": "2.0.20",
+  "version": "2.0.23",
   "description": "Huizhizuo desktop workbench",
   "author": "Huizhizuo",
   "private": true,
@@ -10,12 +10,12 @@
     "dev": "vite",
     "electron:dev": "concurrently -k \"vite --host 127.0.0.1 --port 5173\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "electron:pack": "pnpm run build && electron-builder --win --dir",
-    "electron:dist": "pnpm run build && electron-builder --win nsis",
+    "electron:dist": "pnpm run build && node electron/build-nsis.cjs",
     "electron:portable": "pnpm run build && node electron/build-portable.cjs",
     "electron:prepare-portable": "node electron/build-portable.cjs --prepare-only",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "test": "vitest run && node --test electron/main.node-test.cjs electron/build-portable.node-test.cjs"
+    "test": "vitest run && node --test electron/main.node-test.cjs electron/build-portable.node-test.cjs electron/package-config.node-test.cjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.51.0",
@@ -53,6 +53,7 @@
     "asar": true,
     "win": {
       "icon": "public/brand/hz-logo.ico",
+      "requestedExecutionLevel": "asInvoker",
       "target": [
         {
           "target": "nsis",
@@ -66,8 +67,9 @@
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowElevation": false,
+      "allowElevation": true,
       "allowToChangeInstallationDirectory": true,
+      "selectPerMachineByDefault": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     }

@@ -6,9 +6,11 @@ from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import json
+import re
 import sqlite3
 from typing import Any, Iterator
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 
 @dataclass(frozen=True)
@@ -503,6 +505,40 @@ class AppStorage:
 
 def new_id() -> str:
     return str(uuid4())
+
+
+def output_folder_name(*, username: str, job_id: str, created_at: str | None) -> str:
+    safe_username = safe_folder_part(username) or "user"
+    timestamp = beijing_timestamp(created_at)
+    suffix = re.sub(r"[^A-Za-z0-9]", "", job_id)[:8] or "job"
+    return f"{safe_username}_{timestamp}_{suffix}"
+
+
+def safe_folder_part(value: str, *, limit: int = 40) -> str:
+    normalized = re.sub(r"[^\w-]+", "_", str(value or "").strip(), flags=re.UNICODE)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized[:limit].strip("_")
+
+
+def beijing_timestamp(value: str | None) -> str:
+    parsed = parse_storage_datetime(value)
+    return parsed.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
+
+
+def parse_storage_datetime(value: str | None) -> datetime:
+    if value:
+        text = value.strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            parsed = datetime.now(timezone.utc)
+    else:
+        parsed = datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _default_auth_expiry() -> str:

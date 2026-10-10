@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from app.providers.kele import KeleGptImage2Provider
+
+
+SINGLE_IMAGE_OUTPUT_SIZE = (800, 800)
 
 
 @dataclass(frozen=True)
@@ -31,8 +35,10 @@ class MockSingleImageProvider:
         job_dir = output_dir / "single-image" / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
         path = job_dir / "single.png"
-        Image.new("RGB", (1024, 1024), "white").save(path)
-        return SingleGeneratedImage(output_type="single", width=1024, height=1024, path=path)
+        Image.new("RGB", SINGLE_IMAGE_OUTPUT_SIZE, "white").save(path, format="PNG")
+        return SingleGeneratedImage(
+            output_type="single", width=SINGLE_IMAGE_OUTPUT_SIZE[0], height=SINGLE_IMAGE_OUTPUT_SIZE[1], path=path,
+        )
 
 
 class KeleSingleImageProvider:
@@ -57,9 +63,14 @@ class KeleSingleImageProvider:
         job_dir = output_dir / "single-image" / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
         path = job_dir / "single.png"
-        path.write_bytes(image_bytes)
-        with Image.open(path) as image:
-            normalized = image.convert("RGB")
-            width, height = normalized.size
-            normalized.save(path, format="PNG", optimize=True)
+        with Image.open(BytesIO(image_bytes)) as image:
+            contained = ImageOps.contain(
+                image.convert("RGB"), SINGLE_IMAGE_OUTPUT_SIZE, method=Image.Resampling.LANCZOS,
+            )
+        normalized = Image.new("RGB", SINGLE_IMAGE_OUTPUT_SIZE, "white")
+        normalized.paste(
+            contained, ((normalized.width - contained.width) // 2, (normalized.height - contained.height) // 2),
+        )
+        normalized.save(path, format="PNG", optimize=True)
+        width, height = normalized.size
         return SingleGeneratedImage(output_type="single", width=width, height=height, path=path)

@@ -19,8 +19,13 @@ from app.core.billing import (
     reserve_generation_charge,
 )
 from app.providers.kele import KeleGptImage2Provider
-from app.providers.single_image import KeleSingleImageProvider, MockSingleImageProvider, SingleGeneratedImage
-from app.storage import AppStorage, new_id, row_to_dict
+from app.providers.single_image import (
+    SINGLE_IMAGE_OUTPUT_SIZE,
+    KeleSingleImageProvider,
+    MockSingleImageProvider,
+    SingleGeneratedImage,
+)
+from app.storage import AppStorage, new_id, output_folder_name, row_to_dict
 
 
 router = APIRouter(prefix="/api/v1", tags=["single-image"])
@@ -223,6 +228,7 @@ def execute_claimed_single_image_job(
     if context is None:
         return True
     job = context["job"]
+    user = context["user"]
     provider = provider_override or build_single_image_provider()
     try:
         with runtime_services.slot(
@@ -232,10 +238,21 @@ def execute_claimed_single_image_job(
         ):
             generated = provider.generate_single_image(
                 output_dir=storage.output_dir,
-                job_id=job_id,
+                job_id=output_folder_name(
+                    username=user.get("username", ""),
+                    job_id=job_id,
+                    created_at=job.get("created_at"),
+                ),
                 prompt=job["prompt"],
                 reference_image_paths=[Path(asset["file_path"]) for asset in context["assets"]],
             )
+            # Validate the saved pixels before publishing the output or charging the hold.
+            with Image.open(generated.path) as output_image:
+                if output_image.size != SINGLE_IMAGE_OUTPUT_SIZE or output_image.format != "PNG":
+                    raise RuntimeError("SINGLE_IMAGE_OUTPUT_INVALID: expected an 800x800 PNG.")
+                output_image.load()
+                if (generated.width, generated.height) != output_image.size:
+                    raise RuntimeError("SINGLE_IMAGE_OUTPUT_INVALID: dimensions do not match the saved image.")
     except Exception as exc:
         if str(exc).startswith("SLOT_BUSY"):
             requeue_single_image_job(storage, job_id=job_id, user_id=job["user_id"])
@@ -279,6 +296,9 @@ def single_image_job_context(storage: AppStorage, *, job_id: str) -> dict[str, A
         job = row_to_dict(connection.execute("SELECT * FROM single_image_jobs WHERE id = ?", (job_id,)).fetchone())
         if job is None:
             return None
+        user = row_to_dict(connection.execute("SELECT * FROM users WHERE id = ?", (job["user_id"],)).fetchone())
+        if user is None:
+            return None
         rows = connection.execute(
             """
             SELECT
@@ -296,7 +316,7 @@ def single_image_job_context(storage: AppStorage, *, job_id: str) -> dict[str, A
             """,
             (job_id, job["user_id"]),
         ).fetchall()
-    return {"job": job, "assets": [dict(row) for row in rows]}
+    return {"job": job, "user": user, "assets": [dict(row) for row in rows]}
 
 
 def get_reference_assets(storage: AppStorage, *, asset_version_ids: list[str], user_id: str) -> list[dict[str, Any]]:

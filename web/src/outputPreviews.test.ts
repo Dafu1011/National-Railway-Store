@@ -88,6 +88,26 @@ describe("output previews", () => {
     expect(previews.map((preview) => preview.id)).toEqual(["main-id", "package-id"]);
   });
 
+  it("treats passed quality status case-insensitively for completed generation previews", async () => {
+    const outputs: OutputResponse[] = [
+      { id: "main-id", output_type: "main", width: 800, height: 800, quality_status: "PASSED" },
+      { id: "detail-id", output_type: "detail", width: 800, height: 800, quality_status: " passed " },
+    ];
+    const downloaded: string[] = [];
+
+    const previews = await createOutputPreviews(
+      outputs,
+      async (output) => {
+        downloaded.push(output.id);
+        return new Blob([output.id], { type: "image/png" });
+      },
+      (blob) => `blob://${blob.size}`,
+    );
+
+    expect(downloaded).toEqual(["main-id", "detail-id"]);
+    expect(previews.map((preview) => preview.id)).toEqual(["main-id", "detail-id"]);
+  });
+
   it("uses gallery thumbnails for previews when the API provides them", () => {
     const output: OutputResponse = {
       id: "thumb-output-id",

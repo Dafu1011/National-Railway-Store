@@ -1,9 +1,13 @@
 from pathlib import Path
+import logging
 import os
 import sys
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.account import router as account_router
 from app.api.phase_one import router as phase_one_router
@@ -14,6 +18,8 @@ from app.core.object_storage import load_object_storage_config
 from app.core.runtime_services import build_runtime_services
 from app.storage import AppStorage
 from app.workers.generation_queue import GenerationQueue
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(data_dir: str | Path | None = None, *, load_env: bool = False) -> FastAPI:
@@ -38,6 +44,7 @@ def create_app(data_dir: str | Path | None = None, *, load_env: bool = False) ->
     app.include_router(account_router)
     app.include_router(standards_router)
     app.include_router(updates_router)
+    register_error_logging(app)
     app.router.on_startup.append(app.state.generation_queue.start)
     app.router.on_shutdown.append(app.state.generation_queue.stop)
 
@@ -58,6 +65,34 @@ def create_app(data_dir: str | Path | None = None, *, load_env: bool = False) ->
         return {"status": "ready"}
 
     return app
+
+
+def register_error_logging(app: FastAPI) -> None:
+    @app.exception_handler(HTTPException)
+    async def log_http_exception(request: Request, exc: HTTPException) -> JSONResponse:
+        logger.warning(
+            "HTTP error path=%s method=%s status=%s detail=%s",
+            request.url.path,
+            request.method,
+            exc.status_code,
+            exc.detail,
+        )
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers)
+
+    @app.exception_handler(RequestValidationError)
+    async def log_validation_exception(request: Request, exc: RequestValidationError) -> JSONResponse:
+        logger.warning(
+            "Request validation error path=%s method=%s errors=%s",
+            request.url.path,
+            request.method,
+            exc.errors(),
+        )
+        return JSONResponse(status_code=422, content=jsonable_encoder({"detail": exc.errors()}))
+
+    @app.exception_handler(Exception)
+    async def log_unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("Unhandled error path=%s method=%s", request.url.path, request.method)
+        return JSONResponse(status_code=500, content={"detail": {"code": "INTERNAL_SERVER_ERROR", "message": "服务器内部错误。"}})
 
 
 def load_local_env(path: Path) -> None:

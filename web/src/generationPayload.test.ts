@@ -2,6 +2,62 @@ import { describe, expect, it } from "vitest";
 import { buildProjectCreatePayload } from "./generationPayload";
 
 describe("generation payload", () => {
+  const sceneFormValues = {
+    name: "会议摄像头",
+    companyName: "测试公司",
+    manufacturerName: "测试厂家",
+    productionDate: "2026-10-10",
+    inspector: "QC-01",
+    barcodeType: "EAN_13" as const,
+  };
+
+  it("keeps a partially filled scene in its original slot and trims only its edges", () => {
+    const payload = buildProjectCreatePayload(
+      { ...sceneFormValues, scene1: " \n ", scene3: "  会议室，用于远程会议\n保留白板  " },
+      "product-id", "6903244675147",
+    );
+    expect(payload.detail_config).toEqual({ scene_inputs: { scene_3: "会议室，用于远程会议\n保留白板" } });
+  });
+
+  it("sends all four scene descriptions without deduplicating user choices", () => {
+    const payload = buildProjectCreatePayload(
+      { ...sceneFormValues, scene1: "办公室，用于会议", scene2: "办公室，用于会议", scene3: "教室，用于授课", scene4: "家庭，用于通话" },
+      "product-id", "6903244675147",
+    );
+    expect(payload.detail_config).toEqual({ scene_inputs: {
+      scene_1: "办公室，用于会议", scene_2: "办公室，用于会议", scene_3: "教室，用于授课", scene_4: "家庭，用于通话",
+    } });
+  });
+
+  it("keeps the legacy empty detail config when all scene inputs are blank", () => {
+    const payload = buildProjectCreatePayload(
+      { ...sceneFormValues, scene1: "", scene2: " \t", scene3: "\n", scene4: undefined },
+      "product-id", "6903244675147",
+    );
+    expect(payload.detail_config).toEqual({});
+  });
+
+  it.each([undefined, "", " \t\n "])("omits an unfilled manufacturer address (%j) from both configs", (manufacturerAddress) => {
+    const payload = buildProjectCreatePayload(
+      {
+        name: "智枫保温杯",
+        companyName: "智枫科技",
+        manufacturerName: "智枫生产厂家",
+        manufacturerAddress,
+        productionDate: "2026-07-27",
+        inspector: "QC-01",
+        barcodeType: "EAN_13",
+      },
+      "product-id",
+      "6903244675147",
+    );
+
+    expect(payload.certificate_config).not.toHaveProperty("manufacturer_address");
+    expect(payload.package_config).not.toHaveProperty("manufacturer_address");
+    expect(payload.certificate_config.manufacturer_name).toBe("智枫生产厂家");
+    expect(payload.package_config.manufacturer_name).toBe("智枫生产厂家");
+  });
+
   it("sends manufacturer and address to package config", () => {
     const payload = buildProjectCreatePayload(
       {
@@ -82,5 +138,24 @@ describe("generation payload", () => {
 
     expect(payload.style_config).toMatchObject({ product_logo_enabled: true });
     expect(payload.certificate_config).toMatchObject({ product_volume: "large" });
+  });
+
+  it("sends vehicle product volume as a real backend parameter", () => {
+    const payload = buildProjectCreatePayload(
+      {
+        name: "智枫四轮车",
+        companyName: "智枫科技",
+        manufacturerName: "智枫生产厂家",
+        manufacturerAddress: "浙江省杭州市西湖区智枫路88号",
+        productionDate: "2026-07-27",
+        inspector: "QC-01",
+        barcodeType: "EAN_13",
+        productVolume: "car",
+      },
+      "product-id",
+      "6903244675147",
+    );
+
+    expect(payload.certificate_config).toMatchObject({ product_volume: "car" });
   });
 });

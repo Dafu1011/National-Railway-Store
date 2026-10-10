@@ -19,7 +19,7 @@ export async function createOutputPreviews(
   createUrl: (blob: Blob) => string,
   options: { preserveOrder?: boolean; ignoreDownloadErrors?: boolean } = {},
 ): Promise<PreviewImage[]> {
-  const downloadableOutputs = outputs.filter((output) => output.quality_status === "passed");
+  const downloadableOutputs = outputs.filter(isPassedOutput);
   const previewResults = await Promise.allSettled(
     downloadableOutputs.map(async (output) => {
       const blob = await download(output);
@@ -32,6 +32,10 @@ export async function createOutputPreviews(
   }
   const previewImages = previewResults.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
   return options.preserveOrder ? previewImages : sortOutputs(previewImages);
+}
+
+function isPassedOutput(output: OutputResponse): boolean {
+  return output.quality_status.trim().toLowerCase() === "passed";
 }
 
 export function createGalleryPreviews(outputs: OutputResponse[]): PreviewImage[] {

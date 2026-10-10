@@ -271,6 +271,29 @@ class KeleProviderTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "KELE_TIMEOUT"):
                 provider.edit_image(prompt="generate product main image", size="1024x1024", image_paths=[source])
 
+    def test_retries_provider_detail_timeout_message(self):
+        expected_png = b"\x89PNG\r\n\x1a\nretried-detail-timeout"
+        images = FakeImages(
+            SimpleNamespace(data=[SimpleNamespace(b64_json=b64encode(expected_png).decode("ascii"))]),
+            failures=[RuntimeError("detail: Request timed out.")],
+        )
+        sleeps: list[float] = []
+        provider = KeleGptImage2Provider(
+            KeleConfig(base_url="https://code28.ccwu.cc/v1", api_key="test-key", model="gpt-image-2"),
+            client_factory=lambda **_kwargs: FakeOpenAIClient(images),
+            retry_sleep=sleeps.append,
+            retry_base_delay_seconds=0,
+        )
+
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "product.png"
+            source.write_bytes(b"uploaded-product-image")
+            result = provider.edit_image(prompt="generate product main image", size="1024x1024", image_paths=[source])
+
+        self.assertEqual(result, expected_png)
+        self.assertEqual(len(images.edit_calls), 2)
+        self.assertEqual(sleeps, [0])
+
     def test_retries_cloudflare_524_with_provider_retry_after(self):
         class CloudflareTimeoutError(Exception):
             status_code = 524
@@ -298,6 +321,33 @@ class KeleProviderTests(unittest.TestCase):
         self.assertEqual(result, expected_png)
         self.assertEqual(len(images.edit_calls), 2)
         self.assertEqual(sleeps, [120])
+
+    def test_retries_policy_violation_more_times_than_regular_limit(self):
+        expected_png = b"\x89PNG\r\n\x1a\nretried-policy-violation"
+        images = FakeImages(
+            SimpleNamespace(data=[SimpleNamespace(b64_json=b64encode(expected_png).decode("ascii"))]),
+            failures=[
+                RuntimeError("Error code: 400 - {'code': 'content_policy_violation', 'message': 'Your request was rejected as a result of our safety system.'}"),
+                RuntimeError("Error code: 400 - {'code': 'content_policy_violation', 'message': 'Your request was rejected as a result of our safety system.'}"),
+                RuntimeError("Error code: 400 - {'code': 'content_policy_violation', 'message': 'Your request was rejected as a result of our safety system.'}"),
+            ],
+        )
+        sleeps: list[float] = []
+        provider = KeleGptImage2Provider(
+            KeleConfig(base_url="https://code28.ccwu.cc/v1", api_key="test-key", model="gpt-image-2"),
+            client_factory=lambda **_kwargs: FakeOpenAIClient(images),
+            retry_sleep=sleeps.append,
+            retry_base_delay_seconds=0,
+        )
+
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "product.png"
+            source.write_bytes(b"uploaded-product-image")
+            result = provider.edit_image(prompt="generate policy-safe detail image", size="1024x1024", image_paths=[source])
+
+        self.assertEqual(result, expected_png)
+        self.assertEqual(len(images.edit_calls), 4)
+        self.assertEqual(sleeps, [0, 0, 0])
 
 
 if __name__ == "__main__":
